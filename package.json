@@ -1,0 +1,10 @@
+{
+  "name": "tryevo-board-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dashboard executivo do board Trello TryEvo",
+  "scripts": {
+    "refresh": "node refresh.js",
+    "serve": "npx serve -l 8000 ."
+  }
+}
