@@ -6,7 +6,7 @@ const https = require('https');
 
 const TRELLO_KEY = process.env.TRELLO_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
-const TRELLO_BOARD_ID = process.env.TRELLO_BOARD_ID;
+const TRELLO_BOARD_ID = process.env.TRELLO_BOARD_ID ;
 
 function get(url) {
   return new Promise((resolve, reject) => {
@@ -36,7 +36,9 @@ async function fetchBoardLight(key, token, boardId) {
     get(buildUrl(`/boards/${boardId}/lists`, { ...auth, filter: 'all', fields: 'id,name,closed,pos' })),
     get(buildUrl(`/boards/${boardId}/cards/all`, {
       ...auth,
-      fields: 'id,idShort,name,desc,closed,idList,idLabels,idMembers,idChecklists,due,dueComplete,dateLastActivity,shortUrl',
+      fields: 'id,idShort,name,desc,closed,idList,idLabels,idMembers,idChecklists,due,dueComplete,dateLastActivity,shortUrl,cover,badges',
+      attachments: 'cover',
+      attachment_fields: 'id,url,name,bytes,date,previews',
     })),
     get(buildUrl(`/boards/${boardId}/labels`, { ...auth, limit: 100, fields: 'id,name,color' })),
     get(buildUrl(`/boards/${boardId}/members`, { ...auth, fields: 'id,fullName,username' })),
@@ -57,9 +59,24 @@ async function fetchBoardLight(key, token, boardId) {
   };
 }
 
-// EPIC_META genérico — o cliente enriquece com config.json (icon, color, prioridade reais)
+// Reusa exatamente o processBoard do refresh.js (copiado/adaptado pra rodar em function)
 const EPIC_META = {
-  OUTROS: { name: 'Outros', priority: 'P3', icon: '📦' },
+  INFRA: { name: 'Infraestrutura, DevOps & Segurança', priority: 'P0', icon: '🛡️' },
+  AUTH:  { name: 'Autenticação & Autorização',         priority: 'P0', icon: '🔐' },
+  ATS:   { name: 'ATS (Pipeline / Hunting / Publish)', priority: 'P1', icon: '🎯' },
+  PROFILE:   { name: 'Perfis PF & PJ',                 priority: 'P1', icon: '👤' },
+  INTERVIEW: { name: 'Entrevistas (Meet, STT, AI)',     priority: 'P1', icon: '🎬' },
+  HUNT:  { name: 'Hunting / Sourcing',                  priority: 'P1', icon: '🔍' },
+  EVAL:  { name: 'Avaliações / Testes',                 priority: 'P1', icon: '📝' },
+  JOBS:  { name: 'Vagas / Minhas Vagas',                priority: 'P1', icon: '💼' },
+  BILLING:{ name: 'Billing & Pagamentos',                priority: 'P2', icon: '💰' },
+  NOTIFY:{ name: 'Notificações',                        priority: 'P2', icon: '🔔' },
+  TAE:   { name: 'Triagem AI Engine',                   priority: 'P0', icon: '🧠' },
+  UI:    { name: 'UI / Design System / Dashboards',     priority: 'P1', icon: '🎨' },
+  CRON:  { name: 'Cronjobs',                            priority: 'P0', icon: '⏰' },
+  APP:   { name: 'Aplicativos & Relatórios',            priority: 'P1', icon: '📱' },
+  APPS:  { name: 'Candidaturas (Apply Flow)',           priority: 'P2', icon: '📨' },
+  OUTROS:{ name: 'Outros',                              priority: 'P3', icon: '📦' },
 };
 
 function ageDays(dateStr) {
@@ -121,6 +138,9 @@ function processBoard(board) {
       status,
       pop: null, dor: null, dod: null, invest: null,
       idChecklists: c.idChecklists || [],
+      cover: c.cover || null,
+      attachments: c.attachments || [],
+      badges: c.badges || {},
     };
   });
 

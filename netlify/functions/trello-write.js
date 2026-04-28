@@ -1,18 +1,22 @@
 // Netlify Function — proxy seguro pra escrita no Trello
-// Env vars (Netlify Site settings → Environment variables):
-//   TRELLO_KEY           — API Key do Power-Up (https://trello.com/power-ups/admin)
-//   TRELLO_TOKEN         — Token gerado por OAuth (formato ATTA...)
-//   TRELLO_BOARD_ID      — Short ID do board (ex: phsrxq2o em trello.com/b/phsrxq2o)
-//   TCC_DASH_SECRET      — Secret compartilhado com o time pra autorizar escrita
+// O token Trello fica no env do Netlify (TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID)
+// Auth do client via header X-TCC-Secret (compara com env TCC_DASH_SECRET)
 //
-// Auth do client via header X-TCC-Secret (compara com TCC_DASH_SECRET)
+// Endpoints suportados (POST /api/trello-write):
+//   { action: 'createCard',  data: { idList, name, desc?, idMembers?, idLabels?, due? } }
+//   { action: 'updateCard',  data: { id, name?, desc?, idList?, due? } }
+//   { action: 'moveCard',    data: { id, idList } }
+//   { action: 'comment',     data: { id, text } }
+//   { action: 'archiveCard', data: { id } }
+//   { action: 'addMember',   data: { id, idMember } }
+//   { action: 'addLabel',    data: { id, idLabel } }
 
 const https = require('https');
 
 const TRELLO_KEY = process.env.TRELLO_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
-const TRELLO_BOARD_ID = process.env.TRELLO_BOARD_ID;
-const SHARED_SECRET = process.env.TCC_DASH_SECRET || process.env.TRYEVO_DASH_SECRET;
+const TRELLO_BOARD_ID = process.env.TRELLO_BOARD_ID ;
+const SHARED_SECRET = process.env.TCC_DASH_SECRET || process.env.TRYEVO_DASH_SECRET; // setado pelo admin
 
 function trelloRequest(method, path, body) {
   return new Promise((resolve, reject) => {
@@ -166,6 +170,32 @@ const handlers = {
   async createBoardLabel(d) {
     if (!d.name && !d.color) throw new Error('createBoardLabel requer name ou color');
     return trelloRequest('POST', `/labels`, { name: d.name || '', color: d.color || 'sky', idBoard: process.env.TRELLO_BOARD_ID  });
+  },
+
+  // ─── Attachments ───
+  async getAttachments(d) {
+    if (!d.id) throw new Error('getAttachments requer id (cardId)');
+    return trelloRequest('GET', `/cards/${d.id}/attachments`);
+  },
+  async addAttachment(d) {
+    if (!d.idCard || !d.url) throw new Error('addAttachment requer idCard + url');
+    return trelloRequest('POST', `/cards/${d.idCard}/attachments`, {
+      url: d.url,
+      name: d.name || undefined,
+      setCover: d.setCover || false,
+    });
+  },
+  async removeAttachment(d) {
+    if (!d.idCard || !d.idAttachment) throw new Error('removeAttachment requer idCard + idAttachment');
+    return trelloRequest('DELETE', `/cards/${d.idCard}/attachments/${d.idAttachment}`);
+  },
+  async setCover(d) {
+    if (!d.idCard) throw new Error('setCover requer idCard');
+    return trelloRequest('PUT', `/cards/${d.idCard}`, {
+      cover: d.idAttachment
+        ? JSON.stringify({ idAttachment: d.idAttachment, brightness: 'dark' })
+        : JSON.stringify({ color: null, idAttachment: null }),
+    });
   },
 };
 

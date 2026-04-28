@@ -710,11 +710,50 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .card {
   background: var(--bg-3); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13px;
+  border-radius: var(--radius-sm); font-size: 13px;
   cursor: grab;
   border-left: 4px solid var(--epic-color, var(--fg-dim));
   transition: all 0.15s;
+  overflow: hidden;
 }
+.card.has-cover .card-cover {
+  width: 100%;
+  max-height: 140px;
+  overflow: hidden;
+  background: var(--bg-2);
+}
+.card.has-cover .card-cover img {
+  width: 100%;
+  height: auto;
+  display: block;
+  object-fit: cover;
+}
+.card .card-content {
+  padding: 12px 14px;
+}
+.card:not(.has-cover) .card-content {
+  padding: 12px 14px;
+}
+/* Compat: cards sem cover não têm card-content */
+.card:not(.has-cover) > .card-id { padding: 12px 14px 0; }
+
+.card-badges {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-top: 6px;
+}
+.card-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  background: var(--bg-2);
+  color: var(--fg-muted);
+  padding: 2px 7px; border-radius: 8px;
+  font-size: 10.5px; font-weight: 600;
+}
+.card-badge.due-badge {
+  background: var(--accent-glow); color: var(--accent-2);
+}
+.card-badge.due-badge.soon { background: var(--yellow-soft); color: var(--yellow); }
+.card-badge.due-badge.overdue { background: var(--red-soft); color: var(--red); animation: pulse 2s infinite; }
+.card-badge.due-badge.done { background: var(--green-soft); color: var(--green); }
 .card[draggable="true"]:active { cursor: grabbing; }
 .card.dragging {
   opacity: 0.4;
@@ -1711,6 +1750,59 @@ table.pr-table tr:hover { background: var(--bg-4) !important; }
   filter: brightness(1.2);
   transform: scale(1.05);
 }
+
+/* ============ ATTACHMENTS (modal) ============ */
+.attachment-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 8px 0 12px;
+}
+.attachment-img-wrap {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+  transition: border-color 0.15s;
+}
+.attachment-img-wrap:hover { border-color: var(--accent); }
+.attachment-img-wrap img {
+  width: 100%; height: 120px;
+  object-fit: cover;
+  display: block;
+}
+.attachment-img-actions {
+  position: absolute; top: 6px; right: 6px;
+  display: flex; gap: 4px;
+  opacity: 0; transition: opacity 0.15s;
+}
+.attachment-img-wrap:hover .attachment-img-actions { opacity: 1; }
+.attachment-img-actions .mini-btn {
+  background: rgba(0,0,0,0.7);
+  border-color: rgba(255,255,255,0.2);
+  color: white;
+  font-size: 13px;
+}
+.attachment-img-name {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-top: 1px solid var(--border-soft);
+}
+.attachment-list {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 8px 0 12px;
+}
+.attachment-item {
+  display: flex; gap: 10px; align-items: center;
+  background: var(--bg-3);
+  border-radius: 5px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+}
+.attachment-item a { color: var(--accent); flex: 1; word-break: break-all; }
 
 /* ============ FAB (Floating Action Button) ============ */
 .fab {

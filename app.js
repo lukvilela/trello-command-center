@@ -1416,18 +1416,47 @@ function renderCardSmall(c, opts = {}) {
   }
 
   const draggable = opts.draggable !== false;
+
+  // Cover image (se card tem cover ou primeiro attachment for imagem)
+  let coverHtml = '';
+  if (c.cover && c.cover.scaled && c.cover.scaled.length) {
+    const best = c.cover.scaled[Math.min(2, c.cover.scaled.length - 1)];
+    coverHtml = `<div class="card-cover"><img src="${escapeHtml(best.url)}" alt="" loading="lazy"></div>`;
+  } else if (c.attachments && c.attachments.length) {
+    const firstImg = c.attachments.find(a => a.url && /\.(png|jpe?g|gif|webp)(\?|$)/i.test(a.url));
+    if (firstImg) coverHtml = `<div class="card-cover"><img src="${escapeHtml(firstImg.url)}" alt="" loading="lazy"></div>`;
+  }
+
+  // Badges adicionais (attachment count, comments count)
+  const attachmentCount = c.attachments ? c.attachments.length : 0;
+  const commentCount = c.commentCount || 0;
+  const checklistCount = c.idChecklists ? c.idChecklists.length : 0;
+  const badgesExtra = [];
+  if (attachmentCount > 0) badgesExtra.push(`<span class="card-badge" data-tooltip="${attachmentCount} anexo${attachmentCount>1?'s':''}">📎 ${attachmentCount}</span>`);
+  if (commentCount > 0) badgesExtra.push(`<span class="card-badge" data-tooltip="${commentCount} comentário${commentCount>1?'s':''}">💬 ${commentCount}</span>`);
+  if (checklistCount > 0) badgesExtra.push(`<span class="card-badge" data-tooltip="${checklistCount} checklist${checklistCount>1?'s':''}">☑️ ${checklistCount}</span>`);
+  if (c.due) {
+    const dueDays = Math.floor((new Date(c.due).getTime() - Date.now()) / 86400000);
+    const dueClass = c.dueComplete ? 'done' : (dueDays < 0 ? 'overdue' : dueDays < 3 ? 'soon' : '');
+    badgesExtra.push(`<span class="card-badge due-badge ${dueClass}" data-tooltip="Due: ${formatDate(c.due)}">📅 ${c.dueComplete ? '✓' : (dueDays < 0 ? `${-dueDays}d atrasado` : dueDays === 0 ? 'hoje' : `${dueDays}d`)}</span>`);
+  }
+
   return `
-    <div class="card ${epicCls}" data-card-id="${c.idShort}" data-card-mongoid="${c.id}" ${draggable ? 'draggable="true"' : ''}>
-      <div class="card-id">
-        #${c.idShort}
-        ${epic ? `<span class="epic-tag" style="color:var(--epic-${epic})">${epic}</span>` : ''}
-        ${prBadge}
-      </div>
-      <div class="card-title">${escapeHtml(cleanTitle(c.name))}</div>
-      <div class="card-footer">
-        ${labelDots}
-        ${ageStr ? `<span class="age ${ageClass}" data-tooltip="Última atividade: ${formatDate(c.dateLastActivity)}">${ageStr}</span>` : ''}
-        <span class="members">${memberAvatars}</span>
+    <div class="card ${epicCls} ${coverHtml ? 'has-cover' : ''}" data-card-id="${c.idShort}" data-card-mongoid="${c.id}" ${draggable ? 'draggable="true"' : ''}>
+      ${coverHtml}
+      <div class="card-content">
+        <div class="card-id">
+          #${c.idShort}
+          ${epic ? `<span class="epic-tag" style="color:var(--epic-${epic})">${epic}</span>` : ''}
+          ${prBadge}
+        </div>
+        <div class="card-title">${escapeHtml(cleanTitle(c.name))}</div>
+        ${badgesExtra.length ? `<div class="card-badges">${badgesExtra.join('')}</div>` : ''}
+        <div class="card-footer">
+          ${labelDots}
+          ${ageStr ? `<span class="age ${ageClass}" data-tooltip="Última atividade: ${formatDate(c.dateLastActivity)}">${ageStr}</span>` : ''}
+          <span class="members">${memberAvatars}</span>
+        </div>
       </div>
     </div>`;
 }
@@ -2007,31 +2036,33 @@ function renderPRModalFull(repo, number, bundle) {
 let modalCardId = null;
 let modalChecklists = null;
 let modalComments = null;
+let modalAttachments = null;
 
 async function showCardModal(c) {
   modalCardId = c.id;
   modalChecklists = null;
   modalComments = null;
+  modalAttachments = null;
 
   const prs = getPRsForCard(c.idShort);
   const commits = getCommitsForCard(c.idShort);
-  const epic = getEpic(c.name);
 
-  // Render imediato com placeholders pra checklists e comments
   renderCardModal(c, prs, commits);
   $('#modal').hidden = false;
   document.addEventListener('keydown', escClose);
 
-  // Lazy load checklists e comments via Function (com secret) — read-only fetch via proxy não precisa secret na verdade, mas reusa a Function
+  // Lazy load checklists, comments, attachments
   if (getStoredSecret()) {
     try {
-      const [cl, co] = await Promise.all([
+      const [cl, co, at] = await Promise.all([
         trelloWrite('getChecklists', { id: c.id }).catch(() => null),
         trelloWrite('getComments', { id: c.id }).catch(() => null),
+        trelloWrite('getAttachments', { id: c.id }).catch(() => null),
       ]);
-      if (modalCardId !== c.id) return; // user fechou ou trocou
+      if (modalCardId !== c.id) return;
       modalChecklists = (cl && cl.result) || [];
       modalComments = (co && co.result) || [];
+      modalAttachments = (at && at.result) || [];
       renderCardModal(c, prs, commits);
     } catch {}
   }
@@ -2056,6 +2087,9 @@ function renderCardModal(c, prs, commits) {
 
   // Listas pra mover
   const lists = state.derived.lists.filter(l => !l.closed);
+
+  // Attachments
+  const attachmentsHtml = renderAttachmentsBlock(c);
 
   // Checklists carregadas?
   const checklistsHtml = renderChecklistsBlock(c);
@@ -2157,6 +2191,9 @@ function renderCardModal(c, prs, commits) {
           ${c.due ? '<button id="clear-due">×</button>' : ''}
           ${c.due ? `<label style="margin-left:auto;font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="due-complete" ${c.dueComplete ? 'checked' : ''}> Concluída</label>` : ''}
         </div>
+
+        <!-- Attachments / imagens -->
+        ${attachmentsHtml}
 
         <!-- Checklists -->
         ${checklistsHtml}
@@ -2361,6 +2398,9 @@ function bindCardModalEvents(c) {
   // ─── Comments ───
   bindCommentsEvents(c);
 
+  // ─── Attachments ───
+  bindAttachmentsEvents(c);
+
   // ─── Archive / Delete ───
   $('#archive-card-btn')?.addEventListener('click', async () => {
     if (!confirm(`Arquivar o card #${c.idShort}?\n\nPode ser desarquivado depois pelo Trello.`)) return;
@@ -2518,6 +2558,104 @@ function bindChecklistsEvents(c) {
       renderCardModal(c, getPRsForCard(c.idShort), getCommitsForCard(c.idShort));
       bindCardModalEvents(c);
     } catch (err) { showToast(`❌ ${err.message}`, 'error'); }
+  });
+}
+
+function renderAttachmentsBlock(c) {
+  if (!modalAttachments) {
+    return `<h3>📎 Anexos</h3><div><em style="color:var(--fg-dim)">Carregando…</em></div>`;
+  }
+  const images = modalAttachments.filter(a => a.url && /\.(png|jpe?g|gif|webp|svg)(\?|$)/i.test(a.url));
+  const others = modalAttachments.filter(a => !images.includes(a));
+
+  const imagesHtml = images.length ? `
+    <div class="attachment-images">
+      ${images.map(a => `
+        <div class="attachment-img-wrap" data-att-id="${a.id}">
+          <a href="${escapeHtml(a.url)}" target="_blank">
+            <img src="${escapeHtml(a.url)}" alt="${escapeHtml(a.name || '')}" loading="lazy">
+          </a>
+          <div class="attachment-img-actions">
+            <button class="mini-btn set-cover-btn" data-att-id="${a.id}" data-att-url="${escapeHtml(a.url)}" title="Definir como cover">🎨</button>
+            <button class="mini-btn remove-att-btn" data-att-id="${a.id}" title="Remover">🗑️</button>
+          </div>
+          <div class="attachment-img-name">${escapeHtml(a.name || a.url.split('/').pop())}</div>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  const othersHtml = others.length ? `
+    <div class="attachment-list">
+      ${others.map(a => `
+        <div class="attachment-item" data-att-id="${a.id}">
+          <span>📄</span>
+          <a href="${escapeHtml(a.url)}" target="_blank">${escapeHtml(a.name || a.url)}</a>
+          <button class="mini-btn remove-att-btn" data-att-id="${a.id}" style="margin-left:auto" title="Remover">×</button>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  return `
+    <h3>📎 Anexos ${modalAttachments.length > 0 ? `(${modalAttachments.length})` : ''}</h3>
+    ${imagesHtml}
+    ${othersHtml}
+    ${modalAttachments.length === 0 ? '<div style="color:var(--fg-dim);font-size:12px;margin-bottom:8px">nenhum anexo</div>' : ''}
+    <details class="add-something">
+      <summary>+ Adicionar anexo (URL)</summary>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <input type="url" class="qa-input" id="new-att-url" placeholder="https://...">
+        <input type="text" class="qa-input" id="new-att-name" placeholder="Nome (opcional)" style="max-width:160px">
+        <button id="add-att-btn" style="background:var(--accent);color:var(--bg);font-weight:600">Anexar</button>
+      </div>
+      <div style="font-size:11px;color:var(--fg-dim);margin-top:6px">
+        Cole URL de imagem (.png/.jpg/.gif/.svg/.webp) ou qualquer link. Imagens aparecem inline.
+      </div>
+    </details>
+  `;
+}
+
+function bindAttachmentsEvents(c) {
+  // Add attachment via URL
+  $('#add-att-btn')?.addEventListener('click', async () => {
+    const url = $('#new-att-url').value.trim();
+    const name = $('#new-att-name').value.trim();
+    if (!url) return;
+    try {
+      await trelloWrite('addAttachment', { idCard: c.id, url, name: name || undefined });
+      const at = await trelloWrite('getAttachments', { id: c.id });
+      modalAttachments = at.result || [];
+      renderCardModal(c, getPRsForCard(c.idShort), getCommitsForCard(c.idShort));
+      bindCardModalEvents(c);
+      showToast('📎 Anexo adicionado', 'success');
+    } catch (err) { showToast(`❌ ${err.message}`, 'error'); }
+  });
+
+  // Set cover
+  $$('.set-cover-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const idAttachment = btn.dataset.attId;
+      try {
+        await trelloWrite('setCover', { idCard: c.id, idAttachment });
+        showToast('🎨 Cover definida', 'success');
+      } catch (err) { showToast(`❌ ${err.message}`, 'error'); }
+    });
+  });
+
+  // Remove attachment
+  $$('.remove-att-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const idAttachment = btn.dataset.attId;
+      if (!confirm('Remover este anexo?')) return;
+      try {
+        await trelloWrite('removeAttachment', { idCard: c.id, idAttachment });
+        modalAttachments = modalAttachments.filter(a => a.id !== idAttachment);
+        renderCardModal(c, getPRsForCard(c.idShort), getCommitsForCard(c.idShort));
+        bindCardModalEvents(c);
+        showToast('🗑️ Anexo removido', 'success');
+      } catch (err) { showToast(`❌ ${err.message}`, 'error'); }
+    });
   });
 }
 
