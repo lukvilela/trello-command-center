@@ -1,5 +1,5 @@
 // Trello Command Center — client side
-// Routes: #/overview, #/kanban, #/cards, #/devs, #/github, #/timeline, #/notes, #/docs
+// Routes: #/overview, #/kanban, #/cards, #/devs, #/github, #/timeline, #/notes
 
 // ═══════════════════════════ STATE ═══════════════════════════
 const state = {
@@ -9,10 +9,9 @@ const state = {
   filter: { dev: null, label: null, epic: null, list: null, search: '' },
   route: 'overview',
   cardsByIdShort: {},
-  currentUser: null,
+  currentUser: null,    // { id, name, role, isMember }
   pollingTimer: null,
   lastRefresh: null,
-  config: null,
 };
 
 // Carregado de config.json em runtime
@@ -27,36 +26,24 @@ async function loadConfig() {
     CONFIG = cfg;
     state.config = cfg;
     TEAM_USERS = cfg.team || [];
-    // Atualiza document.title
     if (cfg.project) {
-      document.title = `${cfg.project.name} — ${cfg.project.tagline || 'Command Center'}`;
-      const brandTitle = document.querySelector('.brand-title');
-      if (brandTitle) brandTitle.textContent = cfg.project.name;
-      const brandSubtitle = document.querySelector('.brand-subtitle');
-      if (brandSubtitle) brandSubtitle.textContent = cfg.project.tagline || 'Command Center';
-      const brandIcon = document.querySelector('.brand-icon');
-      if (brandIcon && cfg.project.icon) brandIcon.textContent = cfg.project.icon;
-      const boardName = document.getElementById('board-name');
-      if (boardName) boardName.textContent = `${cfg.project.icon || '🎯'} ${cfg.project.name}`;
+      document.title = (cfg.project.name || 'Project') + ' — ' + (cfg.project.tagline || 'Command Center');
+      const t = document.querySelector('.brand-title'); if (t) t.textContent = cfg.project.name;
+      const sub = document.querySelector('.brand-subtitle'); if (sub) sub.textContent = cfg.project.tagline || 'Command Center';
+      const ic = document.querySelector('.brand-icon'); if (ic && cfg.project.icon) ic.textContent = cfg.project.icon;
+      const bn = document.getElementById('board-name'); if (bn) bn.textContent = (cfg.project.icon || '🎯') + ' ' + cfg.project.name;
     }
     return cfg;
   } catch (e) {
-    document.getElementById('page').innerHTML = `
-      <div class="empty" style="color:var(--red);max-width:600px;margin:60px auto">
-        <h2>⚠️ config.json não encontrado</h2>
-        <p>Copie <code>config.example.json</code> para <code>config.json</code> e edite com info do seu projeto.</p>
-        <p>Ou peça pro Claude do seu projeto fazer isso — ver <code>PROMPT-CLAUDE.md</code>.</p>
-      </div>`;
+    document.getElementById('page').innerHTML = '<div class="empty" style="color:var(--red);max-width:600px;margin:60px auto"><h2>⚠️ config.json não encontrado</h2><p>Copie <code>config.example.json</code> para <code>config.json</code> e edite com info do seu projeto.</p><p>Ou peça pro Claude do seu projeto fazer isso — ver <code>PROMPT-CLAUDE.md</code>.</p></div>';
     return null;
   }
 }
 
 function getUserPRs(user) {
   if (!state.github || !user || !user.githubLogin) return { open: [], merged: [], conflicting: [] };
-  const repoNames = (CONFIG && CONFIG.project && CONFIG.project.githubRepos) || [];
-  const stripPrefix = repoNames.length ? repoNames[0].full.split('/')[0] + '-' : '';
   const allPRs = Object.values(state.github.repos).flatMap(r =>
-    r.prs.map(pr => ({ ...pr, repo: r.full.split('/')[1].replace(stripPrefix, '') }))
+    r.prs.map(pr => ({ ...pr, repo: r.full.split('/')[1].replace('landit-tryevo-', '') }))
   );
   const mine = allPRs.filter(pr => {
     const login = (pr.author && (pr.author.login || pr.author.name)) || pr.author;
@@ -219,6 +206,17 @@ function getPRsForCard(idShort) {
   if (!state.github || !state.github.cardLinks) return [];
   const link = state.github.cardLinks[idShort];
   return link ? link.prs : [];
+}
+
+// Resolve nome curto ('api', 'web') pro full path ('landit-labs/landit-tryevo-api')
+function getRepoFull(shortName) {
+  if (!shortName) return '';
+  if (shortName.includes('/')) return shortName;
+  if (state.github && state.github.repos) {
+    const r = state.github.repos[shortName];
+    if (r && r.full) return r.full;
+  }
+  return shortName;
 }
 
 function getCommitsForCard(idShort) {
@@ -640,7 +638,7 @@ function renderEpicsPage() {
   let detail = '';
   if (focusEpic) {
     const epicMeta = epics.find(e => e.key === focusEpic);
-    // Mostra TODOS os cards do EPIC (ativos + arquivados/done)
+    // Mostra TODOS os cards do EPIC (ativos + arquivados/done) — header conta todos
     const epicCards = d.cards.filter(c => c.epic === focusEpic);
     const activeCount = epicCards.filter(c => !c.cardClosed && !c.listClosed).length;
     const archivedCount = epicCards.length - activeCount;
@@ -648,11 +646,21 @@ function renderEpicsPage() {
       <section class="section epic-drill-detail" id="epic-drill-detail" style="margin-top:32px">
         <div class="section-header">
           <h2>${epicMeta ? epicMeta.icon + ' ' : ''}EPIC ${focusEpic}: ${epicMeta ? escapeHtml(epicMeta.name) : ''} <span class="count">${epicCards.length}</span></h2>
+          <span class="meta">${activeCount} ativos${archivedCount > 0 ? ` · ${archivedCount} arquivados/done` : ''}</span>
           <button id="epic-clear-btn" style="padding: 4px 10px; font-size: 12px;">✕ limpar filtro</button>
         </div>
         <table class="list">
           <thead><tr><th>ID</th><th>Tipo</th><th>Título</th><th>Lista</th><th>Prioridade</th><th>PR</th><th>Devs</th><th>Idade</th></tr></thead>
-          <tbody>${epicCards.sort((a, b) => a.priorityNum - b.priorityNum || (b.ageDays || 0) - (a.ageDays || 0)).map(c => {
+          <tbody>${epicCards
+            .sort((a, b) => {
+              // Ativos primeiro, depois arquivados
+              const aArc = (a.cardClosed || a.listClosed) ? 1 : 0;
+              const bArc = (b.cardClosed || b.listClosed) ? 1 : 0;
+              if (aArc !== bArc) return aArc - bArc;
+              return a.priorityNum - b.priorityNum || (b.ageDays || 0) - (a.ageDays || 0);
+            })
+            .map(c => {
+            const isArchived = c.cardClosed || c.listClosed;
             const prs = getPRsForCard(c.idShort);
             const openPR = prs.find(p => p.state === 'OPEN');
             const mergedPR = prs.find(p => p.state === 'MERGED');
@@ -661,11 +669,16 @@ function renderEpicsPage() {
               : mergedPR
               ? `<span class="pr-state MERGED">PR #${mergedPR.number}</span>`
               : '—';
+            const statusBadge = c.cardClosed
+              ? '<span class="pr-state CLOSED" style="margin-left:4px">📦 archived</span>'
+              : c.listClosed
+              ? '<span class="pr-state MERGED" style="margin-left:4px">✅ done</span>'
+              : '';
             return `
-              <tr data-card-id="${c.idShort}">
+              <tr data-card-id="${c.idShort}" class="${isArchived ? 'row-archived' : ''}">
                 <td><strong>#${c.idShort}</strong></td>
                 <td><span style="color:var(--fg-muted);font-size:11px">${c.tipo}</span></td>
-                <td>${escapeHtml(cleanTitle(c.name))}</td>
+                <td>${escapeHtml(cleanTitle(c.name))}${statusBadge}</td>
                 <td><span style="color:var(--fg-muted);font-size:11px">${c.list === 'In Progress (Max 2/dev)' ? 'In Progress' : c.list}</span></td>
                 <td>${c.priorityCode}</td>
                 <td>${prCell}</td>
@@ -888,12 +901,13 @@ function renderPRTable(prs, repoFull) {
   const rows = prs.map(pr => {
     const cardId = (pr.title.match(/#(\d+)/) || [])[1];
     const card = cardId ? state.cardsByIdShort[parseInt(cardId, 10)] : null;
+    const authorLogin = (pr.author && (pr.author.login || pr.author.name)) || pr.author || '—';
     return `
-      <tr ${card ? `data-card-id="${card.idShort}"` : ''}>
-        <td><a href="${pr.url}" target="_blank">#${pr.number}</a></td>
+      <tr data-pr-repo="${repoFull}" data-pr-number="${pr.number}" data-pr-hint='${escapeHtml(JSON.stringify({title: pr.title, state: pr.state, isDraft: pr.isDraft, mergeable: pr.mergeable, author: authorLogin, url: pr.url}))}'>
+        <td><strong>#${pr.number}</strong></td>
         <td>${escapeHtml(pr.title)}</td>
         <td><span class="pr-state ${pr.isDraft ? 'DRAFT' : pr.state}">${pr.isDraft ? 'DRAFT' : pr.state}</span>${pr.mergeable === 'CONFLICTING' ? '<span class="conflict-tag">CONFLICT</span>' : ''}</td>
-        <td><span style="color:var(--fg-muted);font-size:11px">${pr.author || '—'}</span></td>
+        <td><span style="color:var(--fg-muted);font-size:11px">${escapeHtml(authorLogin)}</span></td>
         <td>+${pr.additions || 0}/-${pr.deletions || 0}</td>
         <td class="age-cell ${ageColor(Math.floor((Date.now() - new Date(pr.updatedAt).getTime()) / 86400000))}">${timeAgo(pr.updatedAt)}</td>
         <td>${card ? `→ #${card.idShort}` : '—'}</td>
@@ -901,7 +915,7 @@ function renderPRTable(prs, repoFull) {
     `;
   }).join('');
   return `
-    <table class="list">
+    <table class="list pr-table">
       <thead><tr><th>PR</th><th>Título</th><th>Estado</th><th>Autor</th><th>Δ</th><th>Atualizado</th><th>Card</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
@@ -1073,7 +1087,7 @@ function renderDocsPage() {
         <div class="docs-sidebar-title">📖 Índice</div>
         ${navItems}
         <div class="docs-source-link">
-          <a href="${(CONFIG && CONFIG.project && CONFIG.project.repoUrl) || '#'}/tree/main/docs" target="_blank">📂 Editar no GitHub</a>
+          <a href="https://github.com/lukasvilela/tryevo-board-dashboard/tree/main/docs" target="_blank">📂 Editar no GitHub</a>
         </div>
       </aside>
       <article class="docs-main">
@@ -1141,7 +1155,7 @@ async function loadDocAndRender(slug) {
       a.removeAttribute('target');
     } else if (href.startsWith('../')) {
       // Link external relativo (CLAUDE_NEW_DEV.md, _BOARD_INDEX.md, etc.)
-      a.setAttribute('href', `${(CONFIG && CONFIG.project && CONFIG.project.repoUrl) || '#'}/blob/main/docs/${href.replace(/^\.\.\//, '../')}`);
+      a.setAttribute('href', `https://github.com/lukasvilela/tryevo-board-dashboard/blob/main/docs/${href.replace(/^\.\.\//, '../')}`);
       a.setAttribute('target', '_blank');
     }
   });
@@ -1394,9 +1408,11 @@ function renderCardSmall(c, opts = {}) {
   let prBadge = '';
   if (openPR) {
     const cls = openPR.isDraft ? 'draft' : 'open';
-    prBadge = `<span class="pr-badge ${cls}" data-tooltip="${escapeHtml(openPR.title)}">PR #${openPR.number}${openPR.mergeable === 'CONFLICTING' ? ' ⚠' : ''}</span>`;
+    const repoFull = getRepoFull(openPR.repo);
+    prBadge = `<span class="pr-badge ${cls}" data-pr-repo="${repoFull}" data-pr-number="${openPR.number}" data-pr-hint='${escapeHtml(JSON.stringify({title: openPR.title, state: openPR.state, isDraft: openPR.isDraft, mergeable: openPR.mergeable, author: (openPR.author && (openPR.author.login || openPR.author.name)) || openPR.author, url: openPR.url}))}' data-tooltip="${escapeHtml(openPR.title)}">PR #${openPR.number}${openPR.mergeable === 'CONFLICTING' ? ' ⚠' : ''}</span>`;
   } else if (mergedPR) {
-    prBadge = `<span class="pr-badge merged" data-tooltip="${escapeHtml(mergedPR.title)}">✓ #${mergedPR.number}</span>`;
+    const repoFull = getRepoFull(mergedPR.repo);
+    prBadge = `<span class="pr-badge merged" data-pr-repo="${repoFull}" data-pr-number="${mergedPR.number}" data-pr-hint='${escapeHtml(JSON.stringify({title: mergedPR.title, state: 'MERGED', author: (mergedPR.author && (mergedPR.author.login || mergedPR.author.name)) || mergedPR.author, url: mergedPR.url}))}' data-tooltip="${escapeHtml(mergedPR.title)}">✓ #${mergedPR.number}</span>`;
   }
 
   const draggable = opts.draggable !== false;
@@ -1439,6 +1455,23 @@ function bindCardClicks() {
         const detail = document.getElementById('epic-drill-detail');
         if (detail) detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 50);
+    });
+  });
+  // PRs cliquáveis (abre modal)
+  $$('[data-pr-repo][data-pr-number]').forEach(el => {
+    if (el.dataset.bound) return;
+    el.dataset.bound = '1';
+    el.style.cursor = 'pointer';
+    el.addEventListener('click', e => {
+      // Não dispara se clicou em link interno
+      if (e.target.tagName === 'A' && e.target.target === '_blank') return;
+      // Stop propagation pra não abrir modal de card quando o badge tá dentro de um card
+      e.stopPropagation();
+      const repo = el.dataset.prRepo;
+      const number = el.dataset.prNumber;
+      let hint = null;
+      try { hint = JSON.parse(el.dataset.prHint); } catch {}
+      showPRModal(repo, number, hint);
     });
   });
   // Epic clear filter button
@@ -1753,6 +1786,221 @@ function revertMove(card, oldCol) {
     card.list = oldCol.dataset.listName;
     updateColCounts();
   }
+}
+
+// ═══════════════════════════ PR MODAL ═══════════════════════════
+let prModalActive = null;
+
+async function showPRModal(repo, number, prHint = null) {
+  prModalActive = `${repo}#${number}`;
+
+  // Render skeleton com info que já temos
+  const initial = prHint ? renderPRModalSkeleton(repo, number, prHint) : `
+    <button class="modal-close" id="modal-close">×</button>
+    <h2>🔄 Carregando PR ${repo}#${number}…</h2>
+    <div class="loading">Buscando detalhes no GitHub…</div>
+  `;
+  $('#modal-content').innerHTML = initial;
+  $('#modal').hidden = false;
+  document.addEventListener('keydown', escClose);
+  $('#modal-close').onclick = closeModal;
+
+  // Lazy load detalhes
+  try {
+    const r = await fetch(`/.netlify/functions/github-api?action=getPRBundle&repo=${encodeURIComponent(repo)}&number=${number}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.erro || 'erro desconhecido');
+    if (prModalActive !== `${repo}#${number}`) return; // user trocou
+    renderPRModalFull(repo, number, data.result);
+  } catch (e) {
+    $('#modal-content').innerHTML = `
+      <button class="modal-close" id="modal-close">×</button>
+      <h2>❌ Erro carregando PR</h2>
+      <div class="empty">${escapeHtml(e.message)}<br><a href="https://github.com/${repo}/pull/${number}" target="_blank">Abrir no GitHub →</a></div>
+    `;
+    $('#modal-close').onclick = closeModal;
+  }
+}
+
+function renderPRModalSkeleton(repo, number, prHint) {
+  return `
+    <button class="modal-close" id="modal-close">×</button>
+    <h2><a href="${prHint.url}" target="_blank" style="color:inherit;text-decoration:none">${repo}#${number}</a> ${escapeHtml(prHint.title || '')}</h2>
+    <div class="modal-meta">
+      <span class="pr-state ${prHint.isDraft ? 'DRAFT' : prHint.state}">${prHint.isDraft ? 'DRAFT' : prHint.state}</span>
+      <span style="color:var(--fg-muted)">${prHint.author || '—'}</span>
+      ${prHint.mergeable === 'CONFLICTING' ? '<span class="conflict-tag">⚠ CONFLICT</span>' : ''}
+    </div>
+    <div class="loading">Buscando files, reviews, checks…</div>
+  `;
+}
+
+function renderPRModalFull(repo, number, bundle) {
+  const { pr, files, reviews, reviewComments, comments, checks } = bundle;
+
+  const cardId = (pr.title.match(/#(\d+)/) || [])[1];
+  const card = cardId ? state.cardsByIdShort[parseInt(cardId, 10)] : null;
+
+  // Status checks
+  const runs = (checks && checks.check_runs) || [];
+  const checksPassing = runs.filter(r => r.conclusion === 'success').length;
+  const checksFailing = runs.filter(r => r.conclusion === 'failure').length;
+  const checksPending = runs.filter(r => !r.conclusion || r.status !== 'completed').length;
+
+  const checksHtml = runs.length ? `
+    <h3>🤖 CI Checks (${runs.length})</h3>
+    <div class="pr-checks">
+      ${runs.slice(0, 8).map(c => {
+        const icon = c.conclusion === 'success' ? '✅' : c.conclusion === 'failure' ? '❌' : c.conclusion === 'cancelled' ? '⚪' : '⏳';
+        return `
+          <div class="pr-check-item">
+            <span>${icon}</span>
+            <a href="${c.html_url || c.details_url || pr.html_url}" target="_blank">${escapeHtml(c.name)}</a>
+            <span style="color:var(--fg-muted);font-size:11px;margin-left:auto">${c.conclusion || c.status}</span>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  ` : '';
+
+  // Reviews
+  const reviewsByUser = {};
+  for (const r of (reviews || [])) {
+    const login = r.user && r.user.login;
+    if (!login) continue;
+    // Pega só o último review por user
+    if (!reviewsByUser[login] || new Date(r.submitted_at) > new Date(reviewsByUser[login].submitted_at)) {
+      reviewsByUser[login] = r;
+    }
+  }
+  const reviewsList = Object.values(reviewsByUser);
+  const approvals = reviewsList.filter(r => r.state === 'APPROVED').length;
+  const requestedChanges = reviewsList.filter(r => r.state === 'CHANGES_REQUESTED').length;
+
+  const reviewsHtml = reviewsList.length ? `
+    <h3>👀 Reviews (${reviewsList.length})</h3>
+    <div class="pr-reviews">
+      ${reviewsList.map(r => {
+        const stateIcon = r.state === 'APPROVED' ? '✅' : r.state === 'CHANGES_REQUESTED' ? '🔴' : '💬';
+        return `
+          <div class="pr-review-item">
+            <span class="avatar">${initials(r.user.login)}</span>
+            <strong>${escapeHtml(r.user.login)}</strong>
+            <span>${stateIcon} ${r.state.toLowerCase().replace('_', ' ')}</span>
+            <span style="color:var(--fg-dim);font-size:11px;margin-left:auto">${timeAgo(r.submitted_at)}</span>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  ` : '';
+
+  // Files changed
+  const filesHtml = (files && files.length) ? `
+    <h3>📂 Arquivos modificados (${files.length})</h3>
+    <details class="pr-files-toggle">
+      <summary>Ver lista completa (+${pr.additions || 0} / -${pr.deletions || 0})</summary>
+      <div class="pr-files">
+        ${files.map(f => {
+          const statusIcon = f.status === 'added' ? '🆕' : f.status === 'removed' ? '🗑️' : f.status === 'renamed' ? '📝' : '📄';
+          return `
+            <div class="pr-file-item">
+              <span class="pr-file-status">${statusIcon}</span>
+              <a href="${f.blob_url || pr.html_url}" target="_blank" class="pr-file-name">${escapeHtml(f.filename)}</a>
+              <span class="pr-file-stats">
+                <span style="color:var(--green)">+${f.additions}</span>
+                <span style="color:var(--red)">-${f.deletions}</span>
+              </span>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </details>
+  ` : '';
+
+  // Issue comments + review comments combinados
+  const allComments = [
+    ...(comments || []).map(c => ({ ...c, _kind: 'issue' })),
+    ...(reviewComments || []).map(c => ({ ...c, _kind: 'review' })),
+  ].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const commentsHtml = allComments.length ? `
+    <h3>💬 Comentários (${allComments.length})</h3>
+    <div class="pr-comments-list">
+      ${allComments.slice(0, 20).map(c => `
+        <div class="pr-comment-item">
+          <div class="pr-comment-header">
+            <span class="avatar">${initials(c.user.login)}</span>
+            <strong>${escapeHtml(c.user.login)}</strong>
+            ${c._kind === 'review' && c.path ? `<code style="font-size:10.5px">${escapeHtml(c.path)}${c.line ? ':' + c.line : ''}</code>` : ''}
+            <span style="color:var(--fg-dim);font-size:11px;margin-left:auto">${timeAgo(c.created_at)}</span>
+          </div>
+          <div class="pr-comment-body">${escapeHtml((c.body || '').slice(0, 600))}</div>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  // Conflict info
+  const conflictHtml = pr.mergeable === false ? `
+    <div class="pr-conflict-block">
+      <strong>⚠️ Este PR está em conflito com main</strong>
+      <p>O autor precisa fazer rebase ou merge da main e resolver os conflitos antes do merge.</p>
+      <code>git fetch origin && git checkout ${pr.head.ref} && git rebase origin/main</code>
+    </div>
+  ` : '';
+
+  // Card link
+  const cardLinkHtml = card ? `
+    <div class="pr-card-link">
+      🎴 <strong>Linkado ao card</strong>
+      <a href="#" data-card-id="${card.idShort}" id="pr-modal-card-link">#${card.idShort} ${escapeHtml(cleanTitle(card.name))}</a>
+    </div>
+  ` : '';
+
+  $('#modal-content').innerHTML = `
+    <button class="modal-close" id="modal-close">×</button>
+    <h2><a href="${pr.html_url}" target="_blank" style="color:inherit;text-decoration:none">${repo}#${number}</a></h2>
+    <div style="font-size:16px;font-weight:500;margin-bottom:8px;color:var(--fg)">${escapeHtml(pr.title)}</div>
+    <div class="modal-meta">
+      <span class="pr-state ${pr.draft ? 'DRAFT' : pr.state.toUpperCase()}">${pr.draft ? 'DRAFT' : pr.merged_at ? 'MERGED' : pr.state.toUpperCase()}</span>
+      ${pr.mergeable === false ? '<span class="conflict-tag">⚠ CONFLICT</span>' : ''}
+      ${approvals > 0 ? `<span style="color:var(--green);font-weight:600">✅ ${approvals} approval${approvals > 1 ? 's' : ''}</span>` : ''}
+      ${requestedChanges > 0 ? `<span style="color:var(--red);font-weight:600">🔴 ${requestedChanges} changes requested</span>` : ''}
+      ${checksFailing > 0 ? `<span style="color:var(--red);font-weight:600">❌ ${checksFailing} check${checksFailing > 1 ? 's' : ''} failing</span>` : ''}
+      ${checksPending > 0 && checksFailing === 0 ? `<span style="color:var(--yellow)">⏳ ${checksPending} pendente${checksPending > 1 ? 's' : ''}</span>` : ''}
+      ${runs.length > 0 && checksFailing === 0 && checksPending === 0 && checksPassing > 0 ? `<span style="color:var(--green);font-weight:600">✅ ${checksPassing} check${checksPassing > 1 ? 's' : ''} passing</span>` : ''}
+      <a href="${pr.html_url}" target="_blank" style="margin-left:auto">↗ GitHub</a>
+    </div>
+
+    <div class="pr-info-grid">
+      <div><strong>Autor:</strong> ${pr.user ? escapeHtml(pr.user.login) : '—'}</div>
+      <div><strong>Branch:</strong> <code>${escapeHtml((pr.head && pr.head.ref) || '?')}</code> → <code>${escapeHtml((pr.base && pr.base.ref) || 'main')}</code></div>
+      <div><strong>Aberto:</strong> ${formatDate(pr.created_at)} (${timeAgo(pr.created_at)})</div>
+      <div><strong>Update:</strong> ${timeAgo(pr.updated_at)}</div>
+      <div><strong>Diff:</strong> +${pr.additions || 0} / -${pr.deletions || 0} (${pr.changed_files || 0} arquivos · ${pr.commits || 0} commits)</div>
+      ${pr.merged_at ? `<div><strong>Mergeado:</strong> ${formatDate(pr.merged_at)} (${timeAgo(pr.merged_at)})</div>` : ''}
+    </div>
+
+    ${conflictHtml}
+    ${cardLinkHtml}
+
+    ${pr.body ? `<h3>📝 Descrição</h3><div class="pr-body">${escapeHtml(pr.body).slice(0, 2000)}</div>` : ''}
+
+    ${checksHtml}
+    ${reviewsHtml}
+    ${filesHtml}
+    ${commentsHtml}
+  `;
+
+  $('#modal-close').onclick = closeModal;
+
+  // Bind card link
+  $('#pr-modal-card-link')?.addEventListener('click', e => {
+    e.preventDefault();
+    const id = parseInt(e.target.dataset.cardId, 10);
+    const c = state.cardsByIdShort[id];
+    if (c) showCardModal(c);
+  });
 }
 
 // ═══════════════════════════ CARD MODAL ═══════════════════════════
@@ -2662,19 +2910,13 @@ function setupRefreshBtn() {
   });
 }
 
-async function init() {
-  const cfg = await loadConfig();
-  if (!cfg) return; // erro já mostrado
-  navigate();
-  setupSearch();
-  setupRefreshBtn();
-  setupFab();
-  ensureUserOnBoot();
-  await loadData();
-  setupPolling();
-}
-
-init();
+navigate();
+setupSearch();
+setupRefreshBtn();
+setupFab();
+ensureUserOnBoot();
+loadData();
+setupPolling();
 
 // Setup docs search após carregar (re-bound em cada navigate)
 const observer = new MutationObserver(() => {
