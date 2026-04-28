@@ -62,8 +62,12 @@ function getCurrentUser() {
   try {
     const saved = JSON.parse(localStorage.getItem('tcc_current_user') || 'null');
     if (saved) {
-      state.currentUser = saved;
-      return saved;
+      // Rehydrate com versão fresca de TEAM_USERS (caso o schema tenha evoluído)
+      const fresh = TEAM_USERS.find(u => u.id === saved.id);
+      state.currentUser = fresh || saved;
+      // Re-salva versão atualizada
+      if (fresh) localStorage.setItem('tcc_current_user', JSON.stringify(fresh));
+      return state.currentUser;
     }
   } catch {}
   return null;
@@ -89,6 +93,56 @@ function updateUserBadge() {
     </div>
     <span class="user-switch" title="Trocar usuário">⇄</span>
   `;
+
+  // Inject saved filters + notif toggle abaixo do badge
+  const footer = el.parentElement;
+  if (footer && !footer.querySelector('.saved-filters')) {
+    const savedFiltersDiv = document.createElement('div');
+    savedFiltersDiv.className = 'saved-filters';
+    footer.insertBefore(savedFiltersDiv, $('#refresh-btn'));
+  }
+  renderSavedFiltersSidebar();
+}
+
+function renderSavedFiltersSidebar() {
+  const div = document.querySelector('.saved-filters');
+  if (!div) return;
+  const filters = getSavedFilters();
+  const notifEnabled = notificationsEnabled();
+  div.innerHTML = `
+    <div class="saved-filters-title">⭐ Filtros salvos</div>
+    ${filters.length === 0
+      ? '<div style="font-size:11px;color:var(--fg-dim);padding:4px 8px">nenhum (clique em + abaixo)</div>'
+      : filters.map(f => `
+          <div class="saved-filter-item" data-filter-id="${f.id}">
+            <span>📌 ${escapeHtml(f.name)}</span>
+            <span class="saved-filter-del" data-del-id="${f.id}">×</span>
+          </div>
+        `).join('')
+    }
+    <div class="saved-filter-item" id="add-filter-btn" style="color:var(--accent)">+ salvar filtro atual</div>
+    <div class="saved-filter-item" id="notif-toggle-btn" style="color:${notifEnabled ? 'var(--green)' : 'var(--fg-muted)'};margin-top:6px;border-top:1px solid var(--border-soft);padding-top:8px">
+      ${notifEnabled ? '🔔' : '🔕'} ${notifEnabled ? 'Notificações ativas' : 'Ativar notificações'}
+    </div>
+  `;
+
+  // Bind
+  $$('.saved-filter-item[data-filter-id]').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.classList.contains('saved-filter-del')) {
+        e.stopPropagation();
+        deleteSavedFilter(e.target.dataset.delId);
+      } else {
+        applySavedFilter(el.dataset.filterId);
+      }
+    });
+  });
+  $('#add-filter-btn')?.addEventListener('click', saveCurrentFilter);
+  $('#notif-toggle-btn')?.addEventListener('click', () => {
+    if (notificationsEnabled()) disableNotifications();
+    else enableNotifications();
+    renderSavedFiltersSidebar();
+  });
 }
 
 function showUserPicker() {
@@ -158,6 +212,23 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
+}
+
+// Renderiza markdown e converte #NN em links pra cards
+function renderMd(text) {
+  if (!text) return '';
+  if (window.marked) {
+    let html = window.marked.parse(text, { breaks: true, gfm: true });
+    html = html.replace(/#(\d{1,4})\b/g, (m, num) => {
+      const id = parseInt(num, 10);
+      if (state.cardsByIdShort && state.cardsByIdShort[id]) {
+        return `<a href="#" onclick="event.preventDefault();event.stopPropagation();window.__openCard(event, ${id})" class="card-ref">#${num}</a>`;
+      }
+      return m;
+    });
+    return html;
+  }
+  return escapeHtml(text).replace(/\n/g, '<br>');
 }
 
 function formatDate(isoStr, opts = {}) {
@@ -250,12 +321,16 @@ async function loadData(silent = false) {
     ]);
 
     const wasFresh = state.lastRefresh;
+    const oldDerived = state.derived;
     state.derived = derived;
     state.github = github;
     state.notes = notesText;
     state.cardsByIdShort = {};
     for (const c of derived.cards) state.cardsByIdShort[c.idShort] = c;
     state.lastRefresh = derived.refreshedAt;
+
+    // Notifications: detecta mudanças vs versão anterior
+    if (oldDerived && silent) detectChangesForNotifications(oldDerived, derived);
 
     renderHeader();
     render();
@@ -368,17 +443,43 @@ function render() {
     overview: renderOverview,
     epics: renderEpicsPage,
     kanban: renderKanban,
+    roadmap: renderRoadmap,
     cards: renderCardsList,
     devs: renderDevs,
     github: renderGithub,
     timeline: renderTimeline,
     notes: renderNotes,
     docs: renderDocsPage,
+    report: renderReport,
   };
   const fn = renders[route] || renderOverview;
   $('#page').innerHTML = fn();
   bindCardClicks();
   bindFilterClicks();
+  bindReportButtons();
+}
+
+function bindReportButtons() {
+  $('#copy-report-btn')?.addEventListener('click', async () => {
+    const md = $('#report-source')?.textContent || '';
+    try {
+      await navigator.clipboard.writeText(md);
+      showToast('📋 Report copiado pro clipboard', 'success');
+    } catch {
+      showToast('Erro ao copiar — abre o source manualmente', 'error');
+    }
+  });
+  $('#download-report-btn')?.addEventListener('click', () => {
+    const md = $('#report-source')?.textContent || '';
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `status-report-${new Date().toISOString().slice(0,10)}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('💾 Report baixado', 'success');
+  });
 }
 
 // ═══════════════════════════ PAGE: OVERVIEW ═══════════════════════════
@@ -675,7 +776,7 @@ function renderEpicsPage() {
               ? '<span class="pr-state MERGED" style="margin-left:4px">✅ done</span>'
               : '';
             return `
-              <tr data-card-id="${c.idShort}" class="${isArchived ? 'row-archived' : ''}">
+              <tr data-card-id="${c.idShort}" class="${isArchived ? 'row-archived' : ''}" onclick="window.__openCard(event, ${c.idShort})" style="cursor:pointer">
                 <td><strong>#${c.idShort}</strong></td>
                 <td><span style="color:var(--fg-muted);font-size:11px">${c.tipo}</span></td>
                 <td>${escapeHtml(cleanTitle(c.name))}${statusBadge}</td>
@@ -781,7 +882,7 @@ function renderCardsList() {
     const ageClass = ageColor(c.ageDays);
     const priorityLabel = c.labels.find(l => /^\d /.test(l.name || ''));
     return `
-      <tr data-card-id="${c.idShort}">
+      <tr data-card-id="${c.idShort}" onclick="window.__openCard(event, ${c.idShort})" style="cursor:pointer">
         <td><strong>#${c.idShort}</strong></td>
         <td>${epicTag}</td>
         <td>${escapeHtml(cleanTitle(c.name))}</td>
@@ -838,11 +939,11 @@ function renderDevs() {
           </div>
         </div>
         <div class="row"><span class="label-tag">In Progress</span><span class="count ${overWip ? 'warn' : ''}">${work.inProgress.length}/2</span></div>
-        ${work.inProgress.length ? `<ul class="cards-list">${work.inProgress.map(c => `<li data-card-id="${c.idShort}">#${c.idShort} ${escapeHtml(cleanTitle(c.name))}</li>`).join('')}</ul>` : ''}
+        ${work.inProgress.length ? `<ul class="cards-list">${work.inProgress.map(c => `<li data-card-id="${c.idShort}" onclick="window.__openCard(event, ${c.idShort})" style="cursor:pointer">#${c.idShort} ${escapeHtml(cleanTitle(c.name))}</li>`).join('')}</ul>` : ''}
         <div class="row"><span class="label-tag">Sandbox</span><span class="count">${work.sandbox.length}</span></div>
-        ${work.sandbox.length ? `<ul class="cards-list">${work.sandbox.map(c => `<li data-card-id="${c.idShort}">#${c.idShort} ${escapeHtml(cleanTitle(c.name))}</li>`).join('')}</ul>` : ''}
+        ${work.sandbox.length ? `<ul class="cards-list">${work.sandbox.map(c => `<li data-card-id="${c.idShort}" onclick="window.__openCard(event, ${c.idShort})" style="cursor:pointer">#${c.idShort} ${escapeHtml(cleanTitle(c.name))}</li>`).join('')}</ul>` : ''}
         <div class="row"><span class="label-tag">Blocked</span><span class="count">${work.blocked.length}</span></div>
-        ${work.blocked.length ? `<ul class="cards-list">${work.blocked.map(c => `<li data-card-id="${c.idShort}">#${c.idShort} ${escapeHtml(cleanTitle(c.name))}</li>`).join('')}</ul>` : ''}
+        ${work.blocked.length ? `<ul class="cards-list">${work.blocked.map(c => `<li data-card-id="${c.idShort}" onclick="window.__openCard(event, ${c.idShort})" style="cursor:pointer">#${c.idShort} ${escapeHtml(cleanTitle(c.name))}</li>`).join('')}</ul>` : ''}
       </div>`;
   }).join('');
 
@@ -1009,6 +1110,197 @@ function renderTimeline() {
     <h1 class="page-title">⏱️ Timeline</h1>
     <p class="page-subtitle">${recent.length} eventos recentes · PRs, commits e runs do GitHub</p>
     ${recent.length ? `<div class="timeline">${items}</div>` : '<div class="empty">Sem dados — rode <code>node gh-sync.js</code></div>'}`;
+}
+
+// ═══════════════════════════ PAGE: ROADMAP ═══════════════════════════
+function renderRoadmap() {
+  const d = state.derived;
+  const active = d.cards.filter(c => !c.cardClosed && !c.listClosed);
+  const withDue = active.filter(c => c.due).sort((a, b) => new Date(a.due) - new Date(b.due));
+  const noDue = active.filter(c => !c.due);
+
+  const now = Date.now();
+  const buckets = {
+    overdue: { label: '🔴 Atrasados', color: 'var(--red)', cards: [] },
+    today: { label: '🔥 Hoje', color: 'var(--orange)', cards: [] },
+    week: { label: '📅 Próximos 7 dias', color: 'var(--yellow)', cards: [] },
+    month: { label: '📆 Próximos 30 dias', color: 'var(--accent)', cards: [] },
+    later: { label: '🔮 Depois', color: 'var(--fg-muted)', cards: [] },
+    done: { label: '✅ Concluídos', color: 'var(--green)', cards: [] },
+  };
+
+  for (const c of withDue) {
+    const days = (new Date(c.due).getTime() - now) / 86400000;
+    if (c.dueComplete) buckets.done.cards.push(c);
+    else if (days < 0) buckets.overdue.cards.push(c);
+    else if (days < 1) buckets.today.cards.push(c);
+    else if (days <= 7) buckets.week.cards.push(c);
+    else if (days <= 30) buckets.month.cards.push(c);
+    else buckets.later.cards.push(c);
+  }
+
+  const buckHtml = Object.values(buckets).filter(b => b.cards.length).map(b => `
+    <section class="section">
+      <div class="section-header">
+        <h2 style="color:${b.color}">${b.label} <span class="count">${b.cards.length}</span></h2>
+      </div>
+      <div class="roadmap-list">
+        ${b.cards.map(c => {
+          const epic = getEpic(c.name);
+          const dueDate = new Date(c.due);
+          const dateStr = dueDate.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
+          const memberAvatars = c.members.map(m => `<span class="avatar" data-tooltip="${escapeHtml(m.name)}">${initials(m.name)}</span>`).join('');
+          return `
+            <div class="roadmap-card" data-card-id="${c.idShort}" onclick="window.__openCard(event, ${c.idShort})">
+              <div class="roadmap-date">${dateStr}</div>
+              <div class="roadmap-info">
+                <div class="roadmap-title">
+                  ${epic ? `<span class="epic-tag" style="background:var(--epic-${epic});color:white">${epic}</span>` : ''}
+                  <span style="font-weight:600">#${c.idShort}</span> ${escapeHtml(cleanTitle(c.name))}
+                </div>
+                <div class="roadmap-meta">
+                  📋 ${escapeHtml(c.list === 'In Progress (Max 2/dev)' ? 'In Progress' : c.list)}
+                  ${c.priorityCode ? ` · ${c.priorityCode}` : ''}
+                </div>
+              </div>
+              <div class="roadmap-members">${memberAvatars}</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </section>
+  `).join('');
+
+  return `
+    <h1 class="page-title">🗺️ Roadmap</h1>
+    <p class="page-subtitle">${withDue.length} cards com data definida · ${noDue.length} sem data</p>
+
+    <div class="stats" style="margin-bottom:24px">
+      <div class="stat alert-stat"><div class="label">Atrasados</div><div class="value">${buckets.overdue.cards.length}</div></div>
+      <div class="stat warn-stat"><div class="label">Hoje</div><div class="value">${buckets.today.cards.length}</div></div>
+      <div class="stat"><div class="label">Esta semana</div><div class="value">${buckets.week.cards.length}</div></div>
+      <div class="stat"><div class="label">Este mês</div><div class="value">${buckets.month.cards.length}</div></div>
+      <div class="stat success-stat"><div class="label">Concluídos</div><div class="value">${buckets.done.cards.length}</div></div>
+    </div>
+
+    ${buckHtml || '<div class="empty">Nenhum card com data definida ainda. Abre um card → define <strong>📅 Data de entrega</strong>.</div>'}
+
+    ${noDue.length > 0 ? `
+      <section class="section">
+        <div class="section-header">
+          <h2 style="color:var(--fg-muted)">📋 Sem data <span class="count">${noDue.length}</span></h2>
+          <span class="meta">cards ativos sem data definida — útil pra priorizar</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px">
+          ${noDue.slice(0, 30).map(c => {
+            const epic = getEpic(c.name);
+            return `
+              <div class="card" data-card-id="${c.idShort}" onclick="window.__openCard(event, ${c.idShort})" style="cursor:pointer">
+                <div class="card-content">
+                  <div class="card-id">#${c.idShort} ${epic ? `<span class="epic-tag" style="color:var(--epic-${epic})">${epic}</span>` : ''}</div>
+                  <div class="card-title">${escapeHtml(cleanTitle(c.name))}</div>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </section>
+    ` : ''}
+  `;
+}
+
+// ═══════════════════════════ PAGE: STATUS REPORT ═══════════════════════════
+function renderReport() {
+  const d = state.derived;
+  const now = new Date();
+  const weekAgo = now.getTime() - 7 * 86400000;
+  const cur = getCurrentUser();
+
+  const active = d.cards.filter(c => !c.cardClosed && !c.listClosed);
+  const recentDone = d.cards.filter(c => /done/i.test(c.list || '') && c.dateLastActivity && new Date(c.dateLastActivity).getTime() > weekAgo);
+  const inProgress = active.filter(c => c.list === 'In Progress (Max 2/dev)');
+  const sandbox = active.filter(c => c.list === 'Testing / Sandbox');
+  const blocked = active.filter(c => c.list === 'Blocked');
+  const todo = active.filter(c => c.list === 'To-Do');
+
+  const epics = d.epics || [];
+
+  // Markdown report
+  const md = `# Status Report — ${cur ? cur.name + ' · ' : ''}${d.boardName || 'Projeto'}
+**Período:** Semana de ${new Date(weekAgo).toLocaleDateString('pt-BR')} a ${now.toLocaleDateString('pt-BR')}
+**Atualizado:** ${now.toLocaleString('pt-BR')}
+
+---
+
+## 📊 Sumário executivo
+
+| Métrica | Valor |
+|---|---|
+| Cards ativos | ${active.length} |
+| Concluídos esta semana | ${recentDone.length} |
+| Em desenvolvimento | ${inProgress.length} |
+| Em testes/homologação | ${sandbox.length} |
+| Bloqueados | ${blocked.length} |
+| Velocity (cards/semana) | ${d.metrics?.avgVelocity || 0} |
+| Lead time médio | ${d.metrics?.avgLeadTime || 0} dias |
+
+## ✅ Concluídos esta semana (${recentDone.length})
+
+${recentDone.length === 0 ? '_Nenhum card finalizado no período_' :
+  recentDone.map(c => `- **#${c.idShort}** ${cleanTitle(c.name)} _— ${c.members.map(m => m.name.split(' ')[0]).join(', ') || '—'}_`).join('\n')
+}
+
+## 🚀 Em desenvolvimento (${inProgress.length})
+
+${inProgress.length === 0 ? '_Nada em progresso ativo_' :
+  inProgress.map(c => `- **#${c.idShort}** ${cleanTitle(c.name)} _— ${c.members.map(m => m.name.split(' ')[0]).join(', ') || '—'} · ${c.ageDays}d_`).join('\n')
+}
+
+## 🧪 Em testes / Sandbox (${sandbox.length})
+
+${sandbox.length === 0 ? '_Nenhum card em sandbox_' :
+  sandbox.map(c => `- **#${c.idShort}** ${cleanTitle(c.name)} _— aguardando ${c.ageDays}d_`).join('\n')
+}
+
+## ⏸️ Bloqueados (${blocked.length})
+
+${blocked.length === 0 ? '_Sem bloqueios atualmente_' :
+  blocked.map(c => `- **#${c.idShort}** ${cleanTitle(c.name)} _— bloqueado há ${c.ageDays || '?'}d_`).join('\n')
+}
+
+## 📌 Próximos a iniciar (${todo.length})
+
+${todo.length === 0 ? '_To-Do vazio_' :
+  todo.slice(0, 10).map(c => `- **#${c.idShort}** ${cleanTitle(c.name)}${c.priorityCode ? ` · _${c.priorityCode}_` : ''}`).join('\n')
+}
+
+## 🎯 Progresso por EPIC
+
+| EPIC | Total | Done | % |
+|---|---|---|---|
+${epics.filter(e => e.total > 0).slice(0, 12).map(e => `| ${e.icon || '📦'} ${e.key} | ${e.total} | ${e.done} | ${e.completionPct}% |`).join('\n')}
+
+---
+
+_Gerado pelo Command Center · ${new Date().toLocaleString('pt-BR')}_`;
+
+  return `
+    <h1 class="page-title">📊 Status Report</h1>
+    <p class="page-subtitle">Relatório semanal — copiável pra Slack/email/PowerPoint · markdown abaixo</p>
+
+    <div style="display:flex;gap:8px;margin-bottom:18px">
+      <button id="copy-report-btn" style="background:var(--accent);color:var(--bg);font-weight:700;padding:10px 18px">📋 Copiar markdown</button>
+      <button id="download-report-btn" style="padding:10px 18px">💾 Download .md</button>
+      <span style="margin-left:auto;color:var(--fg-muted);font-size:12px;align-self:center">use no Slack, email, PR description, etc.</span>
+    </div>
+
+    <div class="markdown report-preview" style="background:var(--bg-2);padding:24px 28px;border:1px solid var(--border);border-radius:10px;max-width:900px">${renderMd(md)}</div>
+
+    <details style="margin-top:14px">
+      <summary style="cursor:pointer;color:var(--fg-muted)">Ver fonte markdown</summary>
+      <pre id="report-source" style="background:var(--bg);padding:14px;border-radius:6px;font-size:12px;white-space:pre-wrap;border:1px solid var(--border);margin-top:8px">${escapeHtml(md)}</pre>
+    </details>
+  `;
 }
 
 // ═══════════════════════════ PAGE: NOTES ═══════════════════════════
@@ -1340,6 +1632,9 @@ function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 // ═══════════════════════════ FILTERS ═══════════════════════════
 function applyFilters(cards) {
+  const cur = getCurrentUser();
+  const userName = cur && cur.trelloName;
+
   return cards.filter(c => {
     if (state.filter.dev && !c.members.some(m => m.name === state.filter.dev)) return false;
     if (state.filter.label && !c.labels.some(l => l.name === state.filter.label)) return false;
@@ -1349,6 +1644,20 @@ function applyFilters(cards) {
       const hay = `${c.idShort} ${c.name} ${c.members.map(m => m.name).join(' ')}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
+    // Presets
+    if (state.filter.preset === 'mine' && (!userName || !c.members.some(m => m.name === userName))) return false;
+    if (state.filter.preset === 'blocked' && c.list !== 'Blocked') return false;
+    if (state.filter.preset === 'overdue') {
+      if (!c.due || c.dueComplete) return false;
+      if (new Date(c.due).getTime() > Date.now()) return false;
+    }
+    if (state.filter.preset === 'thisweek') {
+      if (!c.due || c.dueComplete) return false;
+      const days = (new Date(c.due).getTime() - Date.now()) / 86400000;
+      if (days < 0 || days > 7) return false;
+    }
+    if (state.filter.preset === 'sandbox' && !/sandbox|testing/i.test(c.list || '')) return false;
+    if (state.filter.preset === 'noassign' && c.members.length > 0) return false;
     return true;
   });
 }
@@ -1359,15 +1668,30 @@ function renderFilters() {
   const epics = [...new Set(d.cards.filter(c => !c.cardClosed && !c.listClosed).map(c => getEpic(c.name)).filter(Boolean))].sort();
   const priorityLabels = ['1 Critico', '2 Alta', '3 Média', '4 Baixa'];
   const f = state.filter;
-  const active = !!(f.dev || f.label || f.epic);
+  const active = !!(f.dev || f.label || f.epic || f.preset);
+  const cur = getCurrentUser();
+
+  // Filtros rápidos / presets
+  const presets = [
+    { id: 'mine',     label: '🎯 Meus cards',       active: f.preset === 'mine' },
+    { id: 'blocked',  label: '⏸️ Bloqueados',       active: f.preset === 'blocked' },
+    { id: 'overdue',  label: '🔴 Atrasados',         active: f.preset === 'overdue' },
+    { id: 'thisweek', label: '📅 Esta semana',       active: f.preset === 'thisweek' },
+    { id: 'sandbox',  label: '🧪 Sandbox',           active: f.preset === 'sandbox' },
+    { id: 'noassign', label: '👤 Sem assignee',      active: f.preset === 'noassign' },
+  ];
+
   return `
     <div class="filters">
       <span class="filter-pill ${!active ? 'active' : ''}" data-clear="1">Todos</span>
-      <span class="sep">| dev:</span>
+      ${presets.map(p => `<span class="filter-pill preset ${p.active ? 'active' : ''}" data-preset="${p.id}">${p.label}</span>`).join('')}
+    </div>
+    <div class="filters" style="margin-top:6px">
+      <span class="sep">dev:</span>
       ${devs.map(n => `<span class="filter-pill ${f.dev === n ? 'active' : ''}" data-dev="${escapeHtml(n)}">${initials(n)} ${escapeHtml(n.split(' ')[0])}</span>`).join('')}
-      <span class="sep">| epic:</span>
+      <span class="sep">epic:</span>
       ${epics.map(e => `<span class="filter-pill ${f.epic === e ? 'active' : ''}" data-epic="${e}" style="border-color:var(--epic-${e})">${e}</span>`).join('')}
-      <span class="sep">| prioridade:</span>
+      <span class="sep">prioridade:</span>
       ${priorityLabels.map(l => `<span class="filter-pill ${f.label === l ? 'active' : ''}" data-label="${l}">${l}</span>`).join('')}
     </div>`;
 }
@@ -1376,7 +1700,9 @@ function bindFilterClicks() {
   $$('.filter-pill').forEach(p => {
     p.addEventListener('click', () => {
       if (p.dataset.clear) {
-        state.filter.dev = null; state.filter.label = null; state.filter.epic = null;
+        state.filter.dev = null; state.filter.label = null; state.filter.epic = null; state.filter.preset = null;
+      } else if (p.dataset.preset !== undefined) {
+        state.filter.preset = state.filter.preset === p.dataset.preset ? null : p.dataset.preset;
       } else if (p.dataset.dev !== undefined) {
         state.filter.dev = state.filter.dev === p.dataset.dev ? null : p.dataset.dev;
       } else if (p.dataset.label !== undefined) {
@@ -1442,7 +1768,7 @@ function renderCardSmall(c, opts = {}) {
   }
 
   return `
-    <div class="card ${epicCls} ${coverHtml ? 'has-cover' : ''}" data-card-id="${c.idShort}" data-card-mongoid="${c.id}" ${draggable ? 'draggable="true"' : ''}>
+    <div class="card ${epicCls} ${coverHtml ? 'has-cover' : ''}" data-card-id="${c.idShort}" data-card-mongoid="${c.id}" ${draggable ? 'draggable="true"' : ''} onclick="window.__openCard(event, ${c.idShort})">
       ${coverHtml}
       <div class="card-content">
         <div class="card-id">
@@ -1461,18 +1787,43 @@ function renderCardSmall(c, opts = {}) {
     </div>`;
 }
 
+// Função global pra onclick inline (à prova de bug de bind)
+window.__openCard = function(e, idShort) {
+  // Ignora click em elementos internos que tem own handler
+  if (e.target.closest('a[target="_blank"]')) return;
+  if (e.target.closest('button')) return;
+  if (e.target.closest('[data-pr-repo]')) return;
+  if (e.target.closest('input, select, textarea')) return;
+
+  const card = state.cardsByIdShort && state.cardsByIdShort[idShort];
+  if (!card) {
+    console.warn('Card not found:', idShort);
+    return;
+  }
+  const cardEl = e.currentTarget;
+  if (cardEl && cardEl.classList.contains('dragging')) return;
+
+  // Shift+click → batch
+  if (e.shiftKey && card.id) {
+    e.preventDefault();
+    if (!batchMode) batchMode = true;
+    toggleCardSelection(card.id);
+    return;
+  }
+  if (batchMode && card.id) {
+    e.preventDefault();
+    toggleCardSelection(card.id);
+    return;
+  }
+
+  e.preventDefault();
+  showCardModal(card);
+};
+
 function bindCardClicks() {
+  // Cursor pointer em todo card
   $$('[data-card-id]').forEach(el => {
-    if (el.dataset.bound) return;
-    el.dataset.bound = '1';
-    el.addEventListener('click', e => {
-      // Não abre modal se está em drag
-      if (el.classList.contains('dragging')) return;
-      e.preventDefault();
-      const id = parseInt(el.dataset.cardId, 10);
-      const card = state.cardsByIdShort[id];
-      if (card) showCardModal(card);
-    });
+    el.style.cursor = 'pointer';
   });
   $$('[data-epic-key]').forEach(el => {
     if (el.dataset.bound) return;
@@ -2051,7 +2402,15 @@ async function showCardModal(c) {
   $('#modal').hidden = false;
   document.addEventListener('keydown', escClose);
 
-  // Lazy load checklists, comments, attachments
+  // Lazy load board.json raw pra activity log
+  ensureBoardRaw().then(() => {
+    if (modalCardId === c.id) {
+      // Re-render só o activity block (lookup direto)
+      const block = $('.modal #card-activity-section');
+      if (block) block.outerHTML = `<div id="card-activity-section">${renderActivityBlock(c)}</div>`;
+    }
+  });
+
   if (getStoredSecret()) {
     try {
       const [cl, co, at] = await Promise.all([
@@ -2064,6 +2423,7 @@ async function showCardModal(c) {
       modalComments = (co && co.result) || [];
       modalAttachments = (at && at.result) || [];
       renderCardModal(c, prs, commits);
+      bindCardModalEvents(c);
     } catch {}
   }
 }
@@ -2175,7 +2535,7 @@ function renderCardModal(c, prs, commits) {
 
         <!-- Description -->
         <h3>📝 Descrição <button class="mini-btn" id="edit-desc-btn">✏️ editar</button></h3>
-        <div class="desc card-desc-display" id="card-desc-display">${c.desc ? escapeHtml(c.desc) : '<em style="color:var(--fg-dim)">sem descrição</em>'}</div>
+        <div class="desc card-desc-display markdown" id="card-desc-display">${c.desc ? renderMd(c.desc) : '<em style="color:var(--fg-dim)">sem descrição</em>'}</div>
         <div class="card-desc-edit" id="card-desc-edit" hidden>
           <textarea class="qa-input" id="card-desc-textarea" rows="8">${escapeHtml(c.desc || '')}</textarea>
           <div style="display:flex;gap:8px;margin-top:6px;justify-content:flex-end">
@@ -2200,6 +2560,9 @@ function renderCardModal(c, prs, commits) {
 
         <!-- Comments -->
         ${commentsHtml}
+
+        <!-- Activity log -->
+        <div id="card-activity-section">${renderActivityBlock(c)}</div>
 
         <!-- GitHub -->
         ${prsHtml}
@@ -2360,7 +2723,7 @@ function bindCardModalEvents(c) {
     try {
       await trelloWrite('updateCard', { id: c.id, desc: newDesc });
       c.desc = newDesc;
-      $('#card-desc-display').innerHTML = newDesc ? escapeHtml(newDesc) : '<em style="color:var(--fg-dim)">sem descrição</em>';
+      $('#card-desc-display').innerHTML = newDesc ? renderMd(newDesc) : '<em style="color:var(--fg-dim)">sem descrição</em>';
       $('#card-desc-display').hidden = false;
       $('#card-desc-edit').hidden = true;
       showToast('📝 Descrição atualizada', 'success');
@@ -2561,6 +2924,10 @@ function bindChecklistsEvents(c) {
   });
 }
 
+function renderActivityLogBlock(c) {
+  return renderActivityBlock(c);
+}
+
 function renderAttachmentsBlock(c) {
   if (!modalAttachments) {
     return `<h3>📎 Anexos</h3><div><em style="color:var(--fg-dim)">Carregando…</em></div>`;
@@ -2603,14 +2970,21 @@ function renderAttachmentsBlock(c) {
     ${othersHtml}
     ${modalAttachments.length === 0 ? '<div style="color:var(--fg-dim);font-size:12px;margin-bottom:8px">nenhum anexo</div>' : ''}
     <details class="add-something">
-      <summary>+ Adicionar anexo (URL)</summary>
+      <summary>+ Adicionar anexo (URL ou upload)</summary>
       <div style="display:flex;gap:6px;margin-top:8px">
         <input type="url" class="qa-input" id="new-att-url" placeholder="https://...">
         <input type="text" class="qa-input" id="new-att-name" placeholder="Nome (opcional)" style="max-width:160px">
-        <button id="add-att-btn" style="background:var(--accent);color:var(--bg);font-weight:600">Anexar</button>
+        <button id="add-att-btn" style="background:var(--accent);color:var(--bg);font-weight:600">Anexar URL</button>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <label class="upload-label" for="att-file-input">
+          📎 Escolher arquivo (max 9MB)
+          <input type="file" id="att-file-input" style="display:none">
+        </label>
+        <span id="upload-status" style="color:var(--fg-muted);font-size:12px"></span>
       </div>
       <div style="font-size:11px;color:var(--fg-dim);margin-top:6px">
-        Cole URL de imagem (.png/.jpg/.gif/.svg/.webp) ou qualquer link. Imagens aparecem inline.
+        Imagens (.png/.jpg/.gif/.svg/.webp) aparecem inline. Outros viram links.
       </div>
     </details>
   `;
@@ -2657,6 +3031,29 @@ function bindAttachmentsEvents(c) {
       } catch (err) { showToast(`❌ ${err.message}`, 'error'); }
     });
   });
+
+  // File upload
+  $('#att-file-input')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 9 * 1024 * 1024) {
+      showToast('Arquivo muito grande (max 9MB)', 'error');
+      return;
+    }
+    const status = $('#upload-status');
+    if (status) status.textContent = `⬆️ Enviando ${file.name}…`;
+    try {
+      await uploadFileToCard(c.id, file);
+      const at = await trelloWrite('getAttachments', { id: c.id });
+      modalAttachments = at.result || [];
+      renderCardModal(c, getPRsForCard(c.idShort), getCommitsForCard(c.idShort));
+      bindCardModalEvents(c);
+      showToast(`📎 ${file.name} anexado`, 'success');
+    } catch (err) {
+      showToast(`❌ ${err.message}`, 'error');
+      if (status) status.textContent = '';
+    }
+  });
 }
 
 function renderCommentsBlock(c) {
@@ -2678,7 +3075,7 @@ function renderCommentsBlock(c) {
               <strong>${escapeHtml(co.memberCreator?.fullName || 'unknown')}</strong>
               <span style="color:var(--fg-dim);font-size:11px">${timeAgo(co.date)}</span>
             </div>
-            <div class="comment-text">${escapeHtml(co.data?.text || '')}</div>
+            <div class="comment-text markdown">${renderMd(co.data?.text || '')}</div>
           </div>
         `).join('')}
     </div>
@@ -2686,19 +3083,125 @@ function renderCommentsBlock(c) {
 }
 
 function bindCommentsEvents(c) {
-  $('#add-comment-btn')?.addEventListener('click', async () => {
-    const text = $('#new-comment-text').value.trim();
+  const handleSubmit = async () => {
+    const textArea = $('#new-comment-text');
+    const text = textArea.value.trim();
     if (!text) return;
+
+    // Slash commands
+    if (text.startsWith('/')) {
+      const handled = await handleSlashCommand(c, text);
+      if (handled) {
+        textArea.value = '';
+        return;
+      }
+    }
+
     try {
       await trelloWrite('comment', { id: c.id, text });
-      $('#new-comment-text').value = '';
+      textArea.value = '';
       const co = await trelloWrite('getComments', { id: c.id });
       modalComments = co.result || [];
       renderCardModal(c, getPRsForCard(c.idShort), getCommitsForCard(c.idShort));
       bindCardModalEvents(c);
       showToast('💬 Comentário adicionado', 'success');
     } catch (err) { showToast(`❌ ${err.message}`, 'error'); }
+  };
+
+  $('#add-comment-btn')?.addEventListener('click', handleSubmit);
+  // Cmd/Ctrl+Enter no textarea envia
+  $('#new-comment-text')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      handleSubmit();
+    }
   });
+}
+
+async function handleSlashCommand(c, text) {
+  const m = text.match(/^\/(\w+)(?:\s+(.+))?$/);
+  if (!m) return false;
+  const [, cmd, arg] = m;
+
+  try {
+    switch (cmd.toLowerCase()) {
+      case 'move':
+      case 'mv': {
+        if (!arg) { showToast('Uso: /move <nome da lista>', 'error'); return true; }
+        const list = state.derived.lists.find(l => l.name.toLowerCase().includes(arg.toLowerCase()) && !l.closed);
+        if (!list) { showToast(`Lista não encontrada: ${arg}`, 'error'); return true; }
+        await trelloWrite('moveCard', { id: c.id, idList: list.id });
+        showToast(`📦 Movido pra ${list.name}`, 'success');
+        c.list = list.name;
+        return true;
+      }
+      case 'assign':
+      case 'add': {
+        if (!arg) { showToast('Uso: /assign <nome>', 'error'); return true; }
+        const m = state.derived.members.find(x => x.name.toLowerCase().includes(arg.toLowerCase()));
+        if (!m) { showToast(`Member não encontrado: ${arg}`, 'error'); return true; }
+        await trelloWrite('addMember', { id: c.id, idMember: m.id });
+        showToast(`👤 ${m.name.split(' ')[0]} atribuído`, 'success');
+        c.members.push({ id: m.id, name: m.name, username: m.username });
+        showCardModal(c);
+        return true;
+      }
+      case 'unassign':
+      case 'rm': {
+        if (!arg) { showToast('Uso: /unassign <nome>', 'error'); return true; }
+        const m = c.members.find(x => x.name.toLowerCase().includes(arg.toLowerCase()));
+        if (!m) { showToast(`Member não está no card: ${arg}`, 'error'); return true; }
+        await trelloWrite('removeMember', { id: c.id, idMember: m.id });
+        c.members = c.members.filter(x => x.id !== m.id);
+        showToast(`👤 ${m.name.split(' ')[0]} removido`, 'success');
+        showCardModal(c);
+        return true;
+      }
+      case 'label': {
+        if (!arg) { showToast('Uso: /label <nome>', 'error'); return true; }
+        const l = state.derived.labels.find(x => x.name && x.name.toLowerCase().includes(arg.toLowerCase()));
+        if (!l) { showToast(`Label não encontrada: ${arg}`, 'error'); return true; }
+        await trelloWrite('addLabel', { id: c.id, idLabel: l.id });
+        c.labels.push({ name: l.name, color: l.color });
+        showToast(`🏷️ ${l.name} adicionada`, 'success');
+        showCardModal(c);
+        return true;
+      }
+      case 'due': {
+        if (!arg) { showToast('Uso: /due YYYY-MM-DD', 'error'); return true; }
+        const due = new Date(arg + 'T18:00:00').toISOString();
+        await trelloWrite('setDue', { id: c.id, due });
+        c.due = due;
+        showToast(`📅 Due: ${arg}`, 'success');
+        return true;
+      }
+      case 'archive': {
+        if (!confirm('Arquivar este card?')) return true;
+        await trelloWrite('archiveCard', { id: c.id });
+        showToast('📦 Arquivado', 'success');
+        closeModal();
+        setTimeout(() => loadData(true), 1500);
+        return true;
+      }
+      case 'help':
+      case '?': {
+        alert(`Slash commands disponíveis:
+/move <lista>      — move pra outra lista
+/assign <nome>     — atribui member
+/unassign <nome>   — remove member
+/label <nome>      — adiciona label
+/due YYYY-MM-DD    — define due date
+/archive           — arquiva o card
+/help              — esta ajuda`);
+        return true;
+      }
+      default:
+        return false; // não é comando reconhecido — vira comentário normal
+    }
+  } catch (err) {
+    showToast(`❌ ${err.message}`, 'error');
+    return true;
+  }
 }
 
 function closeModal() {
@@ -3002,9 +3505,131 @@ function setupFab() {
       showQuickAddCard();
     }
     if (e.key === 'Escape' && !$('#quick-add-modal').hidden) closeQuickAdd();
+    // ESC sai de batch mode
+    if (e.key === 'Escape' && batchMode) {
+      batchMode = false;
+      selectedCards.clear();
+      render();
+    }
   });
   document.addEventListener('click', e => {
     if (e.target.id === 'quick-add-modal') closeQuickAdd();
+  });
+
+  // Batch bar handlers
+  setupBatchBar();
+}
+
+// Atalhos de teclado globais (Vim/GitHub-style: G+K, G+O, etc)
+let gPressed = false;
+function setupKeyboardShortcuts() {
+  document.addEventListener('keydown', e => {
+    // Não dispara se está em input/textarea
+    if (e.target.matches('input, textarea, select, [contenteditable]')) {
+      // Exceto / pra abrir busca
+      if (e.key === '/' && !e.target.value) {
+        e.preventDefault();
+        $('#search')?.focus();
+      }
+      return;
+    }
+    // Modal aberto? só ESC funciona
+    if (!$('#modal').hidden || !$('#quick-add-modal').hidden) {
+      return;
+    }
+
+    // / abre busca
+    if (e.key === '/') {
+      e.preventDefault();
+      $('#search')?.focus();
+      return;
+    }
+
+    // G + ? = navegação
+    if (e.key === 'g' || e.key === 'G') {
+      gPressed = true;
+      setTimeout(() => { gPressed = false; }, 1200);
+      showToast('Próxima tecla pra navegar (O/K/C/D/G/T/E/N)…', 'info');
+      return;
+    }
+    if (gPressed) {
+      const routes = {
+        'o': 'overview', 'k': 'kanban', 'c': 'cards', 'd': 'devs',
+        'g': 'github', 't': 'timeline', 'e': 'epics', 'n': 'notes',
+        'h': 'docs',
+      };
+      const route = routes[e.key.toLowerCase()];
+      if (route) {
+        e.preventDefault();
+        location.hash = '#/' + route;
+        gPressed = false;
+      }
+      return;
+    }
+
+    // ? abre help
+    if (e.key === '?' && e.shiftKey) {
+      e.preventDefault();
+      showShortcutsHelp();
+    }
+  });
+}
+
+function showShortcutsHelp() {
+  $('#quick-add-content').innerHTML = `
+    <button class="modal-close" id="qa-close">×</button>
+    <h2>⌨️ Atalhos de teclado</h2>
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:10px 16px;font-size:13.5px;margin-top:14px">
+      <kbd>/</kbd><span>Foca na busca global</span>
+      <kbd>Ctrl+N</kbd><span>Novo card</span>
+      <kbd>Ctrl+R</kbd><span>Recarregar dados</span>
+      <kbd>?</kbd><span>Esta ajuda</span>
+      <kbd>Esc</kbd><span>Fecha modal / sai do batch mode</span>
+
+      <span style="grid-column:1/-1;margin-top:12px;font-size:11px;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.5px">Navegação (G + tecla)</span>
+      <kbd>G O</kbd><span>Overview</span>
+      <kbd>G E</kbd><span>EPICs</span>
+      <kbd>G K</kbd><span>Kanban</span>
+      <kbd>G C</kbd><span>Cards</span>
+      <kbd>G D</kbd><span>Devs</span>
+      <kbd>G G</kbd><span>GitHub</span>
+      <kbd>G T</kbd><span>Timeline</span>
+      <kbd>G N</kbd><span>Notas</span>
+      <kbd>G H</kbd><span>Docs</span>
+
+      <span style="grid-column:1/-1;margin-top:12px;font-size:11px;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.5px">No modal de card</span>
+      <kbd>Ctrl+Enter</kbd><span>Envia comentário (em vez de só Enter)</span>
+      <kbd>/move xxx</kbd><span>Slash commands no comentário</span>
+
+      <span style="grid-column:1/-1;margin-top:12px;font-size:11px;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.5px">No Kanban</span>
+      <kbd>Shift+Click</kbd><span>Seleção múltipla (batch mode)</span>
+      <kbd>Drag</kbd><span>Mover card entre listas</span>
+    </div>
+  `;
+  $('#quick-add-modal').hidden = false;
+  $('#qa-close').onclick = closeQuickAdd;
+}
+
+function setupBatchBar() {
+  // Popula select de listas
+  const sel = $('#batch-list-select');
+  if (sel && state.derived) {
+    const lists = state.derived.lists.filter(l => !l.closed);
+    sel.innerHTML = '<option value="">Mover pra…</option>' +
+      lists.map(l => `<option value="${l.id}">${escapeHtml(l.name === 'In Progress (Max 2/dev)' ? 'In Progress' : l.name)}</option>`).join('');
+    sel.addEventListener('change', e => {
+      const id = e.target.value;
+      if (id) {
+        batchMove(id);
+        e.target.value = '';
+      }
+    });
+  }
+  $('#batch-archive-btn')?.addEventListener('click', batchArchive);
+  $('#batch-cancel-btn')?.addEventListener('click', () => {
+    batchMode = false;
+    selectedCards.clear();
+    render();
   });
 }
 
@@ -3013,6 +3638,233 @@ function ensureUserOnBoot() {
     setTimeout(() => showUserPicker(), 600);
   } else {
     updateUserBadge();
+  }
+}
+
+// ═══════════════════════════ FILE UPLOAD ═══════════════════════════
+async function uploadFileToCard(cardId, file, setCover = false) {
+  const secret = getStoredSecret();
+  if (!secret) { showSecretPrompt(); throw new Error('sem secret'); }
+  const buffer = await file.arrayBuffer();
+  const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+  const r = await fetch('/.netlify/functions/trello-upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-TCC-Secret': secret,
+      'X-Card-Id': cardId,
+      'X-File-Name': file.name,
+      'X-Mime-Type': file.type || 'application/octet-stream',
+      'X-Set-Cover': setCover ? 'true' : 'false',
+    },
+    body: base64,
+  });
+  if (r.status === 401) { localStorage.removeItem('tcc_dash_secret'); showSecretPrompt(); throw new Error('Secret inválido'); }
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`Upload falhou: ${text.slice(0, 200)}`);
+  }
+  // Netlify codifica resposta como base64 também às vezes — tenta JSON direto
+  return r.json();
+}
+
+// ═══════════════════════════ ACTIVITY LOG (modal de card) ═══════════════════════════
+function getCardActivity(cardMongoId) {
+  // Lê das actions do board.json (raw) — fetched lazy se ainda não tiver
+  if (!state.boardRaw) return [];
+  const actions = state.boardRaw.actions || [];
+  return actions.filter(a => a.data && a.data.card && a.data.card.id === cardMongoId);
+}
+
+async function ensureBoardRaw() {
+  if (state.boardRaw) return;
+  try {
+    const r = await fetch('data/board.json?_=' + Date.now());
+    if (r.ok) state.boardRaw = await r.json();
+  } catch {}
+}
+
+function renderActivityBlock(c) {
+  const acts = getCardActivity(c.id);
+  if (acts.length === 0) {
+    return `<h3>📜 Histórico do card</h3><div style="color:var(--fg-dim);font-size:12px">Sem atividade registrada (ou aguardando refresh)</div>`;
+  }
+  const formatted = acts
+    .slice()
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 30)
+    .map(a => {
+      const who = (a.memberCreator && a.memberCreator.fullName) || '?';
+      const when = timeAgo(a.date);
+      let text = '';
+      if (a.type === 'createCard') text = `criou o card em <code>${escapeHtml(a.data.list ? a.data.list.name : '?')}</code>`;
+      else if (a.type === 'updateCard' && a.data.listAfter && a.data.listBefore) text = `moveu de <code>${escapeHtml(a.data.listBefore.name)}</code> → <code>${escapeHtml(a.data.listAfter.name)}</code>`;
+      else if (a.type === 'updateCard' && a.data.old && 'name' in a.data.old) text = `renomeou (era "<em>${escapeHtml(a.data.old.name)}</em>")`;
+      else if (a.type === 'updateCard' && a.data.old && 'desc' in a.data.old) text = `editou descrição`;
+      else if (a.type === 'updateCard' && a.data.old && 'closed' in a.data.old) text = a.data.card.closed ? 'arquivou' : 'desarquivou';
+      else if (a.type === 'commentCard') text = `comentou: <em>${escapeHtml((a.data.text || '').slice(0, 80))}</em>`;
+      else if (a.type === 'addMemberToCard') text = `adicionou ${escapeHtml((a.member && a.member.fullName) || 'member')}`;
+      else if (a.type === 'removeMemberFromCard') text = `removeu ${escapeHtml((a.member && a.member.fullName) || 'member')}`;
+      else text = a.type;
+      return `<li><span class="avatar">${initials(who)}</span> <strong>${escapeHtml(who)}</strong> ${text} <span style="color:var(--fg-dim);font-size:11px;margin-left:auto">${when}</span></li>`;
+    }).join('');
+  return `
+    <h3>📜 Histórico do card (${acts.length})</h3>
+    <ul class="activity-log">${formatted}</ul>
+  `;
+}
+
+// ═══════════════════════════ SAVED FILTERS ═══════════════════════════
+function getSavedFilters() {
+  try { return JSON.parse(localStorage.getItem('tcc_saved_filters') || '[]'); }
+  catch { return []; }
+}
+function saveSavedFilters(filters) {
+  localStorage.setItem('tcc_saved_filters', JSON.stringify(filters));
+}
+function saveCurrentFilter() {
+  const name = prompt('Nome pra este filtro:');
+  if (!name) return;
+  const filters = getSavedFilters();
+  filters.push({
+    id: 'sf-' + Date.now(),
+    name,
+    filter: { ...state.filter },
+    route: state.route,
+  });
+  saveSavedFilters(filters);
+  showToast(`💾 Filtro "${name}" salvo`, 'success');
+  render();
+}
+function applySavedFilter(id) {
+  const f = getSavedFilters().find(x => x.id === id);
+  if (!f) return;
+  state.filter = { ...f.filter };
+  if (f.route && f.route !== state.route) location.hash = '#/' + f.route;
+  render();
+}
+function deleteSavedFilter(id) {
+  saveSavedFilters(getSavedFilters().filter(x => x.id !== id));
+  render();
+}
+
+// ═══════════════════════════ BATCH OPS ═══════════════════════════
+let batchMode = false;
+const selectedCards = new Set();
+
+function toggleBatchMode() {
+  batchMode = !batchMode;
+  selectedCards.clear();
+  render();
+  if (batchMode) showToast('☑️ Modo seleção: click nos cards pra marcar', 'info');
+}
+
+function toggleCardSelection(cardId) {
+  if (selectedCards.has(cardId)) selectedCards.delete(cardId);
+  else selectedCards.add(cardId);
+  // Update UI sem re-render full
+  const el = document.querySelector(`.card[data-card-mongoid="${cardId}"]`);
+  if (el) el.classList.toggle('selected', selectedCards.has(cardId));
+  updateBatchBar();
+}
+
+function updateBatchBar() {
+  const bar = $('#batch-bar');
+  if (!bar) return;
+  const n = selectedCards.size;
+  if (n === 0 || !batchMode) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+  bar.querySelector('.batch-count').textContent = `${n} card${n > 1 ? 's' : ''} selecionado${n > 1 ? 's' : ''}`;
+}
+
+async function batchMove(idList) {
+  const ids = [...selectedCards];
+  if (!ids.length || !idList) return;
+  const listName = state.derived.lists.find(l => l.id === idList)?.name || 'lista';
+  showToast(`📦 Movendo ${ids.length} cards…`, 'info');
+  let ok = 0, fail = 0;
+  for (const id of ids) {
+    try {
+      await trelloWrite('moveCard', { id, idList });
+      ok++;
+    } catch (e) { fail++; }
+  }
+  showToast(`✅ ${ok} movidos · ❌ ${fail} falharam → ${listName}`, fail > 0 ? 'warning' : 'success');
+  selectedCards.clear();
+  batchMode = false;
+  setTimeout(() => loadData(true), 1500);
+}
+
+async function batchArchive() {
+  const ids = [...selectedCards];
+  if (!ids.length) return;
+  if (!confirm(`Arquivar ${ids.length} cards?`)) return;
+  showToast(`📦 Arquivando ${ids.length}…`, 'info');
+  let ok = 0;
+  for (const id of ids) {
+    try { await trelloWrite('archiveCard', { id }); ok++; } catch {}
+  }
+  showToast(`✅ ${ok} arquivados`, 'success');
+  selectedCards.clear();
+  batchMode = false;
+  setTimeout(() => loadData(true), 1500);
+}
+
+// ═══════════════════════════ NOTIFICATIONS ═══════════════════════════
+function notificationsEnabled() {
+  return localStorage.getItem('tcc_notif_enabled') === 'true' && Notification.permission === 'granted';
+}
+
+async function enableNotifications() {
+  if (!('Notification' in window)) {
+    showToast('Browser não suporta notificações', 'error');
+    return;
+  }
+  const perm = await Notification.requestPermission();
+  if (perm === 'granted') {
+    localStorage.setItem('tcc_notif_enabled', 'true');
+    showToast('🔔 Notificações ativadas', 'success');
+    new Notification('TryEvo Command Center', { body: 'Notificações ativas! Você será avisado quando houver mudanças.', icon: '/favicon.ico' });
+  } else {
+    showToast('Permissão negada', 'error');
+  }
+}
+
+function disableNotifications() {
+  localStorage.setItem('tcc_notif_enabled', 'false');
+  showToast('🔕 Notificações desativadas', 'info');
+}
+
+function notifyChange(title, body) {
+  if (!notificationsEnabled()) return;
+  try {
+    new Notification(title, { body, icon: '/favicon.ico', tag: 'tcc-' + Date.now() });
+  } catch {}
+}
+
+// Detect changes after polling refresh — chamado em loadData
+function detectChangesForNotifications(oldDerived, newDerived) {
+  if (!oldDerived || !newDerived || !notificationsEnabled()) return;
+  const cur = getCurrentUser();
+  if (!cur || !cur.trelloName) return;
+
+  const oldByCard = {};
+  for (const c of oldDerived.cards) oldByCard[c.id] = c;
+
+  for (const c of newDerived.cards) {
+    const old = oldByCard[c.id];
+    if (!old) continue;
+    const isMine = c.members.some(m => m.name === cur.trelloName);
+    if (!isMine) continue;
+    if (old.list !== c.list) {
+      notifyChange(`📦 #${c.idShort} movido pra ${c.list}`, cleanTitle(c.name));
+    }
+    if (old.commentCount < c.commentCount) {
+      notifyChange(`💬 Novo comentário em #${c.idShort}`, cleanTitle(c.name));
+    }
   }
 }
 
@@ -3048,6 +3900,49 @@ function setupRefreshBtn() {
   });
 }
 
+// Event delegation no document — funciona mesmo se bind individual falhar
+function setupGlobalCardClickDelegation() {
+  document.addEventListener('click', (e) => {
+    // Ignora cliques em PR badges (handler dedicado)
+    if (e.target.closest('[data-pr-repo][data-pr-number]')) return;
+    // Ignora links externos
+    if (e.target.closest('a[target="_blank"]')) return;
+    // Ignora botões e inputs
+    if (e.target.closest('button, input, select, textarea, label')) return;
+    // Ignora cliques em filtros/epics (handlers próprios)
+    if (e.target.closest('[data-filter-id], [data-epic-key], [data-uid], [data-att-id], [data-member-id], [data-label-id]')) return;
+
+    const card = e.target.closest('[data-card-id]');
+    if (!card) return;
+    if (card.classList.contains('dragging')) return;
+
+    // Shift+click → batch select
+    if (e.shiftKey && card.dataset.cardMongoid) {
+      e.preventDefault();
+      if (!batchMode) batchMode = true;
+      toggleCardSelection(card.dataset.cardMongoid);
+      return;
+    }
+    if (batchMode && card.dataset.cardMongoid) {
+      e.preventDefault();
+      toggleCardSelection(card.dataset.cardMongoid);
+      return;
+    }
+
+    e.preventDefault();
+    const id = parseInt(card.dataset.cardId, 10);
+    const cardObj = state.cardsByIdShort[id];
+    if (cardObj) {
+      console.log('[card-click] abrindo #' + id, cardObj.name.slice(0, 40));
+      showCardModal(cardObj);
+    } else {
+      console.warn('[card-click] card não achado:', id);
+    }
+  });
+}
+
+setupGlobalCardClickDelegation();
+setupKeyboardShortcuts();
 navigate();
 setupSearch();
 setupRefreshBtn();

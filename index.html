@@ -27,6 +27,9 @@
       <a href="#/kanban" class="nav-item" data-route="kanban">
         <span class="nav-icon">📋</span><span>Kanban</span>
       </a>
+      <a href="#/roadmap" class="nav-item" data-route="roadmap">
+        <span class="nav-icon">🗺️</span><span>Roadmap</span>
+      </a>
       <a href="#/cards" class="nav-item" data-route="cards">
         <span class="nav-icon">🗂️</span><span>Cards</span>
         <span class="nav-badge" id="badge-cards"></span>
@@ -43,6 +46,9 @@
       </a>
       <a href="#/notes" class="nav-item" data-route="notes">
         <span class="nav-icon">📝</span><span>Notas</span>
+      </a>
+      <a href="#/report" class="nav-item" data-route="report">
+        <span class="nav-icon">📊</span><span>Status Report</span>
       </a>
       <a href="#/docs" class="nav-item" data-route="docs">
         <span class="nav-icon">📚</span><span>Docs</span>
@@ -94,6 +100,14 @@
     <span class="fab-icon">+</span>
     <span class="fab-label">Novo card</span>
   </button>
+
+  <!-- Batch action bar -->
+  <div class="batch-bar" id="batch-bar" style="display:none">
+    <span class="batch-count">0 cards</span>
+    <select id="batch-list-select"><option value="">Mover pra…</option></select>
+    <button id="batch-archive-btn">📦 Arquivar</button>
+    <button id="batch-cancel-btn">✕</button>
+  </div>
 
   <!-- Toast notifications -->
   <div class="toast-stack" id="toast-stack"></div>

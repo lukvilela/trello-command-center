@@ -1,6 +1,6 @@
 // Netlify Function — proxy seguro pra escrita no Trello
 // O token Trello fica no env do Netlify (TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID)
-// Auth do client via header X-TCC-Secret (compara com env TCC_DASH_SECRET)
+// Auth do client via header X-TCC-Secret (compara com env TRYEVO_DASH_SECRET)
 //
 // Endpoints suportados (POST /api/trello-write):
 //   { action: 'createCard',  data: { idList, name, desc?, idMembers?, idLabels?, due? } }
@@ -16,7 +16,7 @@ const https = require('https');
 const TRELLO_KEY = process.env.TRELLO_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
 const TRELLO_BOARD_ID = process.env.TRELLO_BOARD_ID ;
-const SHARED_SECRET = process.env.TCC_DASH_SECRET || process.env.TRYEVO_DASH_SECRET; // setado pelo admin
+const SHARED_SECRET = process.env.TRYEVO_DASH_SECRET; // setado pelo admin
 
 function trelloRequest(method, path, body) {
   return new Promise((resolve, reject) => {
@@ -219,7 +219,7 @@ exports.handler = async (event) => {
   // Auth
   const provided = event.headers['x-tcc-secret'] || event.headers['X-TCC-Secret'];
   if (!SHARED_SECRET) {
-    return { statusCode: 500, body: 'Server: TCC_DASH_SECRET não configurado' };
+    return { statusCode: 500, body: 'Server: TRYEVO_DASH_SECRET não configurado' };
   }
   if (!provided || provided !== SHARED_SECRET) {
     return {
